@@ -16,12 +16,11 @@
 barrier, not a seal — see [why perforation still works](#fungus-gnat-control-part-2-perforated-foil) below.
 Seedlings are visibly leggy — long pale stems, sparse leaves — a symptom the
 [grow-light section](#grow-light-and-why-the-schedule-lives-in-home-assistant-not-firmware)
-below has a measured explanation for. The `TANK -0.0%` reading is real. This
-photo was taken at 12:41, after the tank sensor's last good reading at 10:46
-that morning, so it most likely shows the fault described in
-[Known issues](#known-issues--open) rather than a separate mystery — though the
-firmware clamps that percentage to 0-100, so a negative value is still not
-fully accounted for.*
+below has a measured explanation for. The `TANK -0.0%` reading is not a
+separate mystery and is now solved: the photo was taken at 12:41, after the
+tank sensor's last good reading at 10:46 that morning, and the display was
+actually printing **`-nan%`** — which at 18 px reads convincingly as `-0.0%`.
+See [Known issues](#known-issues--open).*
 
 Indoor basil, zero natural light, bottom-watered by ebb and flow: a pump floods
 the outer tray, the water drains back to the reservoir by gravity, and an
@@ -503,10 +502,54 @@ Three measurements would settle it, cheapest first:
 3. Substitute a known-good HC-SR04. Both the fastest test and, if the
    hypothesis holds, the fix.
 
-Also worth checking: the ECHO 1k/2k divider for a pulled wire, and whether the
-aluminium foil fitted the same morning touched a terminal. The foil hazard noted
-above is not hypothetical — it is conductive, and it sits next to the relay
-board and the 12 V rail.
+Two suspects have since been ruled out. The ECHO 1k/2k divider is **SMD 0805,
+soldered**, not flying leads, so a pulled divider wire is not in play; suspicion
+narrows to the module, its DuPont connector, or the three wires. And the
+aluminium foil did **not** touch anything near the HC-SR04.
+
+### The display was printing `-nan%`, and three guards let it through
+
+The `TANK -0.0%` on the photo above was never a rendering bug or a stale value.
+`sensor.basil_tank` has been `unknown` since 10:47:20, Home Assistant renders a
+NaN state as `unknown`, and the OLED was printing `-nan%` — which in the 18 px
+font is a convincing `-0.0%`.
+
+NaN walked through three guards in a row, and each one failed for a different
+reason:
+
+| Guard | Why it did not catch NaN |
+|---|---|
+| `has_state()` | A NaN state *is* a published state. Passes. |
+| `clamp {min: 0, max: 100}` | Every comparison against NaN is false, so neither bound bites. Passes. |
+| `printf("%.0f")` | Renders it as `-nan`. |
+
+The clamp genuinely is there and genuinely does nothing. Display guards are now
+`has_state() && !std::isnan(state)`, and the TANK block gained a `--`
+else-branch it never had — previously a dead tank drew nothing at all, which
+reads as a broken screen rather than a broken sensor. Config validates; not yet
+flashed.
+
+### The rig is currently safe by accident, not by design
+
+This is the part worth stating plainly, because it is exactly the kind of thing
+a later, well-meaning "fix NaN handling" could turn into a fail-open.
+
+Every pump gate is a comparison against `tank_cm` — the pre-cycle check
+(`(tank_cm - dose_cm) > pump_min_cm`) and the in-loop floor (`tank_cm >
+pump_min_cm`). **Every comparison against NaN is false**, so neither gate can
+ever pass: no cycle starts, and a running one could not continue. With the
+sensor dead the pump *cannot* run.
+
+The same semantics silently disable the tank-empty alert, which is the mirror
+image of the same fact: there is no level protection at present, only inaction.
+Safe, but for a reason nobody designed.
+
+**One more consequence, on a different sensor.** The foil did touch the
+**capacitive soil probe**. That damages nothing, but a conductive sheet against
+a capacitive sensor couples into the sense electrodes and inflates the reading
+toward wet. Any soil percentage taken in that state is unusable. Note what this
+does and does not invalidate: it invalidates the *measurement condition*, not
+the calibration figures recorded above.
 
 If the wiring is opened to swap the module anyway, this is the moment to take
 the clean fix the YAML already documents: **move TRIG from D4/GPIO2 to
