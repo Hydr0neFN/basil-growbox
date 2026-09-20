@@ -1,0 +1,999 @@
+# =============================================================================
+# Basil - ebb & flow bottom watering. NodeMCU v3 (Lolin) / ESP8266
+# =============================================================================
+# HYDRAULICS  (single-pump gravity-return design)
+#
+#        [tray + pot]   <- higher
+#             | one tube, outlet at the BOTTOM of the tray, submerged
+#             |          (if the outlet ends in air the water cannot return)
+#        [tank + submersible centrifugal pump]   <- lower
+#
+#   pump ON   -> floods the tray
+#   pump OFF  -> water siphons back down the same tube through the impeller.
+#                Bench test: fully drained in 4min20s at ~15cm of head.
+#   power cut -> same thing. Fail-safe by construction.
+#
+#   That drain is too fast to soak in one go, so a cycle is N flood/drain
+#   pulses instead. Each drain-down pulls air into the root zone - that is
+#   the whole point of ebb & flow, not a side effect.
+#
+#   MANDATORY: an overflow port drilled in the tray 1cm above the target
+#   flood level, piped back to the tank. Gravity return protects against a
+#   power cut; it does NOT protect against a welded relay contact. Only a
+#   physical hole does.
+#
+#   The drain pump is OPTIONAL - only fit it if the gravity return is too
+#   slow. Its wiring and code are present but commented out; IN3/IN4 free.
+#
+# POWER   three converters off one 12V PSU, star ground at the PSU
+#         The relays switch converter OUTPUTS. All three converters are
+#         permanently powered.
+#
+#   12V+ --+--> LM2596S #1 @ 4.45V --[relay CH1 NO]--> LED ring x4
+#          |      Set this one accurately, and set it UNDER LOAD: close
+#          |      CH1, connect the rings, meter at the ring terminals.
+#          |      Switching the output makes that easy to redo any time.
+#          |      4.45V is what the OEM controller delivers at its
+#          |      brightest step and it sets both brightness and LED life.
+#          |      Measured on ONE ring, loaded: 2.5V at the dimmest step,
+#          |      4.45V at 0.35A at the brightest. Voltage tracks
+#          |      brightness, so the rings are VOLTAGE-driven and CV is the
+#          |      right control mode. Four rings draw 1.4A / 6.2W - a tenth
+#          |      of the 15W-a-ring nameplate. Wire gauge and voltage drop
+#          |      are moot at this current.
+#          |
+#          +--> LM2596S #2 @ 5.00V --[relay CH2 NO]--> pump + --+
+#          |      The pump and nothing else. Not fussy: it takes  |
+#          |      2.5-6V. Steady draw 0.6A; the ~2A stall is a  [M7]
+#          |      pulse of tens of ms, below the module's ~3A     | band
+#          |      internal limit, so it cannot stall the motor. pump -
+#          |
+#          +--> RY8326 (5-24V in, 5V 3A fixed)
+#                 --> NodeMCU VIN, DHT11, HC-SR04
+#                 --> relay JD-VCC
+#                 +1000uF and 0.1uF at VIN.  Load ~0.5A, runs cold.
+#
+#   Switching outputs rather than inputs: at 1.4A and 0.6A the contacts do
+#   not care, the LEDs never see a converter cold-start overshoot because
+#   the converter is always settled, and voltages can be trimmed under load
+#   whenever. The cost is ~0.1-0.3W of idle loss per board and a small
+#   hot-plug surge as the output cap dumps into the load on closing.
+#
+#   JD-VCC comes from the always-on RY8326. With outputs switched this is
+#   no longer load-bearing, but keep it: if the relays are ever moved back
+#   to the input side, feeding JD-VCC from a switched converter deadlocks
+#   the board - CH2 open means that converter is dark, so JD-VCC is dark,
+#   so CH2's own coil can never pull in. An earlier revision had that bug.
+#
+#   !! The two LM2596 boards look identical. Label them the moment they are
+#   set - "4.45 LIGHT" and "5.00 PUMP" - and meter them again before wiring.
+#   Swapping them puts 5.0V on the rings, 12% over, into a non-linear curve.
+#
+#   1N4007/M7 across the pump, cathode to +. MANDATORY with the relay on
+#   the output side: the contact interrupts motor current directly, and the
+#   kickback pits it a little every cycle. Months later the symptom is
+#   "sometimes no water", which is miserable to diagnose.
+#
+#   The 100W CC-CV buck is reserved for other work and is not in this
+#   build. Nothing here needs it: at 1.4A its CC pot is unusable anyway
+#   (R010 sense resistors sized for ~10A means ~15mV of sense voltage).
+#
+#   Relay board: JD-VCC jumper cap REMOVED. That cap ties VCC to JD-VCC;
+#   the pin itself stays and must be fed 5V or nothing switches.
+#     logic VCC -> 3V3   NOT 5V. At 5V the opto never fully turns off when
+#                        driven by a 3.3V GPIO and the relay will not release.
+#     JD-VCC    -> 5V    SRD-05VDC coil, from the RY8326.
+#   Note these boards still share ground across the opto, so this buys
+#   noise decoupling, not galvanic isolation.
+#   Contacts wired COM -> NO so loss of power means off.
+#   Pullups on IN1/IN2 are probably NOT needed: on these boards IN is the
+#   opto LED's cathode, so a floating input carries no current and the
+#   relay stays off - and neither GPIO actually floats (GPIO0 is pulled
+#   high at boot for boot mode, GPIO12 resets to input-with-pullup).
+#   Verify instead of guessing: power the relay board alone, VCC to 3V3
+#   and JD-VCC to 5V, with both INs unconnected. No click and no board LED
+#   means no pullups needed. A click also catches a mis-wired VCC or a
+#   jumper cap that is still on.
+#
+#   Never run USB and the 12V supply together - Lolin V3 has no reverse-feed
+#   protection. Unplug 12V before flashing. (This turned out NOT to be what
+#   was blocking serial flashing on 2026-09-18 - see the D4 note - but it
+#   remains a real constraint of the board.)
+#
+# PINOUT                                  boot state -> why it is safe
+#   A0          soil moisture, HW-390 powered from 3V3 (NOT 5V: at 5V the
+#               output can exceed the 3.2V full scale of the A0 divider)
+#   D1  GPIO5   OLED SCL
+#   D2  GPIO4   OLED SDA
+#   D3  GPIO0   lights, relay IN1. The contact switches LM2596 #1's 4.45V
+#               OUTPUT and carries 1.4A. GPIO0 is a strapping pin, but the
+#               relay board on it is harmless: bisection on 2026-09-18
+#               showed it neither blocks flashing nor upsets boot.
+#               Pulled high on boot -> active-low board = OFF.
+#   D4  GPIO2   HC-SR04 TRIG. KNOWN HAZARD, accepted deliberately.
+#               GPIO2 is a boot-strapping pin and must be high at reset.
+#               With the HC-SR04 connected, esptool cannot put the board
+#               into download mode - it reports "No serial data received" -
+#               and the board can come up executing garbage (Fatal
+#               exception 0 at an odd IRAM address).
+#               Established by bisection 2026-09-18: unplugging ONLY the
+#               ultrasonic is enough. The relay on IN1 and the RY8326 can
+#               both stay connected, and the sensor's power state does not
+#               matter, so it is the module pulling TRIG down rather than
+#               anything about which rail feeds it.
+#               Live with it: unplug the HC-SR04 before any serial flash,
+#               or use OTA and never plug USB in again.
+#               The clean fix, if the wiring is ever reopened, is to move
+#               TRIG to D0/GPIO16 - free, not a strapping pin, and a 10us
+#               pulse needs nothing GPIO16 lacks.
+#               GPIO2 also drives the onboard blue LED.
+#   D5  GPIO14  HC-SR04 ECHO. 5V logic -> divide it:
+#                  ECHO --[1k]--+-- D5
+#                               |
+#                             [2k]
+#                               |
+#                              GND
+#   D6  GPIO12  fill pump, relay IN2. 10k pullup to 3V3.
+#   D7  GPIO13  DHT11, ambient air in the box - NOT in the tank. No boot
+#               constraint on this pin. Powered from 3V3 so DATA is 3.3V.
+#               IN3 and IN4 are free (was the parallel light channel and
+#               the optional drain pump).
+#   D0  GPIO16  free - the place to move HC-SR04 TRIG to if the wiring is
+#               ever reopened. See the D4 note.
+#   D8  GPIO15  UNUSED. Held low at boot; an active-low board would latch on.
+#
+# CALIBRATE BEFORE FIRST RUN: tank_empty_cm, tank_full_cm, pump_min_cm,
+#                            calibrate_linear, then the Dose buttons.
+# =============================================================================
+
+substitutions:
+  name: basil
+  friendly: Basil
+
+  # cm from the HC-SR04 face down to the BOTTOM of the tank, measured empty.
+  # Measured 2026-09-18: 23.8. The tape measure says the tub is 22.5cm
+  # deep; the 1.3cm difference is the lid and the sensor standoff, and
+  # 23.8 is the number the firmware wants - it measures from the sensor
+  # face, not the rim.
+  # At 23.8cm the beam cone is only 3.1cm across against a 6.75cm tank
+  # radius, so the centring margin is comfortable here.
+  # Cross-section measured the same day: 480ml moved the level 3.7cm, so
+  # 130 cm2 and 1cm = 130ml. The 0.3cm sensor resolution is then ~39ml.
+  # The tub tapers, so that figure holds near the bottom and grows higher
+  # up - perhaps 10-15% across the full height. It does not affect dosing,
+  # which measures the actual level drop rather than converting to volume;
+  # the ml figure is only for human sanity.
+  tank_empty_cm: "23.8"
+  # Water depth in cm that counts as a full tank, for the % reading.
+  # Measured 2026-09-18: tank_dist read 7.0 at the working level, so
+  # 23.8 - 7.0 = 16.8cm of water, roughly 2.3L allowing for the taper.
+  # Do not fill past about 5cm of distance: the blind zone is 2cm and
+  # readings get unstable as the surface approaches the transducer.
+  tank_full_cm: "16.8"
+  # Water depth in cm at which the pump inlet starts to draw air.
+  # MEASURE IT: stand the pump in the tank, add water until it primes and
+  # runs without gurgling, then measure that depth and add 1cm of margin.
+  # A submersible pump is cooled by the water it moves - running it dry
+  # kills it in seconds, well before the dry-run detector can react.
+  pump_min_cm: "6"
+  # Measured on the real rig 2026-09-18: the tray drained back completely
+  # in ~80s (7.3 -> 9.2 -> 7.3 cm of tank distance). 3min is a 2x margin.
+  # The earlier 4min20s figure came from a bench mock-up with much less
+  # head and does not apply.
+  drain_wait: "3min"
+  # After the water is back, wait before judging the soil. Bottom watering
+  # wicks upward slowly and the probe sits near the surface, so reading it
+  # immediately after a flood reports the transient, not the new moisture.
+  soak_hold: "10min"
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly}
+
+esp8266:
+  board: nodemcuv2
+  restore_from_flash: true
+
+# Explicitly DEBUG. Every logger.log action below defaults to DEBUG level,
+# so raising this to INFO would silently delete the whole event trail -
+# which is exactly what happened on the bench firmware on 2026-09-18 and
+# led to a pump test being misread as a drainage failure.
+logger:
+  level: DEBUG
+
+# The API key stays, unlike the OTA password. Losing it is not a lockout:
+# generate a new one, reflash, and re-add the device in Home Assistant.
+# What it protects is real - the HA API gives full control of the board.
+api:
+  encryption:
+    key: !secret basil_api_key
+
+# No OTA password on purpose: the user loses access to the source tree
+# often enough that being locked out of OTA is the likelier failure than
+# someone on the LAN pushing firmware. Recovery without it means opening
+# the box and flashing over USB.
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${friendly} Fallback"
+    password: !secret fallback_password
+
+# captive_portal REMOVED 2026-09-19. It drags in a web server and a DNS
+# server to serve the AP-fallback setup page, and this device has 4.1-4.7kB
+# of free heap with a largest contiguous block of only ~1.8kB - not enough
+# for a Noise handshake buffer, which is why every API connection attempt
+# risked taking the device down. The fallback AP itself is kept; it just no
+# longer serves a config page, and the real recovery path used in practice
+# is opening the box and flashing over USB.
+
+# No web_server. Home Assistant is the interface (added 2026-09-18), and an
+# ESP8266 serves very few simultaneous connections - a browser holding the
+# SSE stream competes with HA's API session and can make the device look
+# unavailable. v1 also truncated its single-response entity table here, and
+# v2 worked but was redundant. basil-bench.yaml keeps its web UI; that one
+# has no API and the page is its only interface.
+
+time:
+  - platform: homeassistant
+    id: ha_time
+  # sntp keeps the light schedule running when Home Assistant is down
+  - platform: sntp
+    id: sntp_time
+    servers: [nl.pool.ntp.org]
+    # 18h photoperiod, lit 06:00-24:00 and dark 00:00-06:00. Basil
+    # tolerates 18h and 6h of dark is enough. The extra 2h over a
+    # conventional 16h is compensation, not preference: the rings
+    # measure 1.56W each (4.45V x 0.35A), 6.2W for all four, against a
+    # 15W-per-ring nameplate. At ~1.2 umol/J over a 0.04 m2 pot that is
+    # roughly 187 umol/m2/s and DLI 12.1 at 18h - the bottom of the 12-16
+    # basil target, and optimistic since it assumes every photon lands on
+    # the pot. Lowering the rings helps most: PPFD goes as 1/d^2.
+
+i2c:
+  sda: GPIO4
+  scl: GPIO5
+  frequency: 400kHz
+
+# ------------------------------------------------------------- tunables
+number:
+  - platform: template
+    name: "Dose"
+    id: dose_cm
+    unit_of_measurement: cm
+    icon: mdi:cup-water
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    # Measured 2026-09-18 on the real rig. A setting of 1.7 delivered 1.9cm
+    # in 28s - the loop polls every 2s at ~0.068 cm/s, so it always
+    # overshoots the setpoint by roughly 0.2cm. The user judged 1.9cm about
+    # 5s short of covering the pot base, so the setpoint went to 2.0.
+    # 2026-09-20: user asked for 3s less again -> 1.8, landing at ~2.0cm /
+    # ~260ml in the 500ml tray. Net of both adjustments this is +2s on the
+    # original 1.7, so the first correction overshot slightly.
+    # NOTE: restore_value wins over this on a normal boot, but a restored
+    # value does NOT always survive an OTA - the 2.1 set via the API on
+    # 2026-09-18 was gone by the next flash. Change both when retuning.
+    initial_value: 1.8
+    min_value: 0.5
+    max_value: 5.0
+    step: 0.1
+
+  # Ebb & flow: each drain pulls fresh air down into the medium, so the
+  # soak is repeated flood/drain cycles rather than one long flood, which
+  # would just suffocate the roots.
+  #
+  # The loop is CLOSED on soil moisture, not on volume. One flood moved the
+  # probe about 5% of its range on 2026-09-18, so a single dose can never
+  # be the right answer - and with a 0.3cm ultrasonic resolution against a
+  # 1.7cm dose, metering volume precisely was never going to work either.
+  # Instead: flood a fixed amount, let it drain, wait, look at the soil,
+  # and go again if it is still dry. This is only a cap for the case where
+  # the probe is lying.
+  - platform: template
+    name: "Max cycles"
+    id: max_cycles
+    icon: mdi:repeat
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_value: 5
+    min_value: 1
+    max_value: 8
+    step: 1
+
+  - platform: template
+    name: "Stop at"
+    id: moist_target
+    unit_of_measurement: "%"
+    icon: mdi:water-check
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    # 2026-09-20: 70 -> 55 for fungus gnat (Sciaridae) control. The probe
+    # sits near the surface, so this number is literally an instruction for
+    # how wet to keep the top of the pot - and the top 2-3cm is the entire
+    # habitat of the larvae. 70% was comfortable for them. The root zone is
+    # still saturated by bottom watering; only the surface is left drier.
+    initial_value: 55
+    min_value: 40
+    max_value: 95
+    step: 5
+
+  - platform: template
+    name: "Water below"
+    id: moist_threshold
+    unit_of_measurement: "%"
+    icon: mdi:water-percent
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    # 2026-09-20: 30 -> 22, same reason. This sets the length of the dry
+    # spell, and a Sciaridae generation is 3-4 days in the top layer, so a
+    # dry-down that reaches 4-5 days actually breaks the cycle instead of
+    # just slowing it. Raise it back if the basil wilts - the plant is the
+    # point, the gnats are a nuisance.
+    initial_value: 22
+    min_value: 10
+    max_value: 60
+    step: 1
+
+  - platform: template
+    name: "Lockout"
+    id: lockout_h
+    unit_of_measurement: h
+    icon: mdi:timer-lock
+    entity_category: config
+    optimistic: true
+    restore_value: true
+    initial_value: 12
+    min_value: 1
+    max_value: 72
+    step: 1
+
+globals:
+  - id: level_at_start
+    type: float
+    restore_value: false
+    initial_value: '0'
+  - id: cal_start
+    type: float
+    restore_value: false
+    initial_value: '0'
+  - id: pulse_start
+    type: float
+    restore_value: false
+    initial_value: '0'
+  - id: dry_abort
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: elapsed
+    type: int
+    restore_value: false
+    initial_value: '0'
+  - id: lockout_until
+    type: int
+    restore_value: true
+    initial_value: '0'
+  - id: drain_fault
+    type: bool
+    restore_value: true
+    initial_value: 'false'
+  - id: soak_done
+    type: bool
+    restore_value: false
+    initial_value: 'false'
+  - id: cycles_done
+    type: int
+    restore_value: false
+    initial_value: '0'
+  - id: prime_tries
+    type: int
+    restore_value: false
+    initial_value: '0'
+  # What the bottom line of the OLED shows. 0 idle, 1 filling, 2 draining,
+  # 3 soaking, 4 re-priming. Set by water_cycle so the panel narrates the
+  # cycle instead of just saying FILLING for 20 of the 800 seconds it runs.
+  - id: phase
+    type: int
+    restore_value: false
+    initial_value: '0'
+
+# -------------------------------------------------------------- sensors
+# Added 2026-09-18 after four unexplained resets in twelve minutes, one of
+# them with no API client connected at all. Nothing on this device recorded
+# why it restarted or how much heap was left, so both were unanswerable.
+# reset_reason distinguishes a watchdog bite from a brownout from a clean
+# reboot; the heap numbers show whether a slow leak or fragmentation is
+# building up between resets. Cheap, and removable once the cause is known.
+debug:
+  update_interval: 30s
+
+text_sensor:
+  - platform: debug
+    reset_reason:
+      name: "Reset reason"
+
+sensor:
+  - platform: adc
+    pin: A0
+    id: soil_raw
+    name: "Soil voltage"
+    entity_category: diagnostic
+    update_interval: 10s
+    accuracy_decimals: 3
+    filters:
+      - median:
+          window_size: 7
+          send_every: 3
+          send_first_at: 3
+
+  - platform: copy
+    source_id: soil_raw
+    id: soil_pct
+    name: "Soil moisture"
+    unit_of_measurement: "%"
+    device_class: moisture
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      # These are the numbers the sensor REPORTS, not the voltage on the
+      # A0 pin. ESPHome reads TOUT, 0-1.0V; the board's 220k/100k divider
+      # means pin volts = reported x 3.2. Use the logged value as-is.
+      #
+      # CALIBRATE AGAINST SOIL, NOT AIR AND WATER. Air is drier than any
+      # soil can be, so anchoring 0% there makes a bone-dry pot read as
+      # 80-90% wet and the watering trigger never fires. Reference points
+      # measured 2026-09-18: air 0.767, a pot the user considered dried
+      # out 0.437 - most of that gap is the presence of soil, not water.
+      #   0%   the intended medium at the driest you would let it get,
+      #        probe inserted to its working depth
+      #   100% the same medium just after a flood, drained
+      # Redo this if the medium changes; coco, peat and potting soil hold
+      # water very differently. Keep the insertion depth fixed - 3cm and
+      # 8cm in the same pot read like different sensors.
+      #
+      # Both points are real readings from the actual pot, 2026-09-18:
+      #   0.437  a pot the user judged dried out and in trouble  -> 0%
+      #   0.322  the same pot settled after a flood              -> 100%
+      # Deliberately NOT air (0.767) - see above.
+      - calibrate_linear:
+          - 0.437 -> 0.0
+          - 0.322 -> 100.0
+      - clamp:
+          min_value: 0
+          max_value: 100
+
+  # Ambient air in the box. Deliberately not in the tank headspace, which
+  # sits near 100% RH and is outside the DHT11's 20-90% range. Keep it away
+  # from the rings (radiant heat reads high) and out of the tray's plume.
+  - platform: dht
+    pin: GPIO13
+    model: DHT11
+    update_interval: 60s
+    temperature:
+      name: "Box temperature"
+      id: box_temp
+      accuracy_decimals: 1
+      filters:
+        - median:
+            window_size: 3
+            send_every: 1
+    humidity:
+      name: "Box humidity"
+      id: box_rh
+      accuracy_decimals: 0
+      filters:
+        - median:
+            window_size: 3
+            send_every: 1
+
+  - platform: ultrasonic
+    trigger_pin: GPIO2
+    echo_pin: GPIO14
+    id: dist_raw
+    name: "Tank distance"
+    entity_category: diagnostic
+    unit_of_measurement: cm
+    accuracy_decimals: 1
+    update_interval: 30s
+    timeout: 2.0m
+    filters:
+      - multiply: 100          # ESPHome reports metres
+      - median:
+          window_size: 3
+          send_every: 1
+          send_first_at: 1
+
+  # Water depth, published from the copy filter below.
+  - platform: template
+    id: tank_cm
+    name: "Tank depth"
+    unit_of_measurement: cm
+    icon: mdi:waves-arrow-up
+    entity_category: diagnostic
+    accuracy_decimals: 1
+    update_interval: never
+    lambda: 'return {};'
+
+  - platform: copy
+    source_id: dist_raw
+    id: tank_pct
+    name: "Tank"
+    unit_of_measurement: "%"
+    icon: mdi:car-coolant-level
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - lambda: |-
+          float depth = ${tank_empty_cm} - x;
+          if (depth < 0) depth = 0;
+          id(tank_cm).publish_state(depth);
+          return depth / ${tank_full_cm} * 100.0f;
+      - clamp:
+          min_value: 0
+          max_value: 100
+
+  - platform: wifi_signal
+    name: "WiFi signal"
+    entity_category: diagnostic
+    update_interval: 60s
+
+  - platform: uptime
+    name: "Uptime"
+    entity_category: diagnostic
+
+  - platform: debug
+    free:
+      name: "Heap free"
+    fragmentation:
+      name: "Heap fragmentation"
+    block:
+      name: "Heap max block"
+
+binary_sensor:
+  - platform: template
+    name: "Needs water"
+    device_class: moisture
+    lambda: |-
+      if (!id(soil_pct).has_state()) return false;
+      return id(soil_pct).state < id(moist_threshold).state;
+
+  - platform: template
+    name: "Tank empty"
+    device_class: problem
+    lambda: |-
+      if (!id(tank_cm).has_state()) return false;
+      return id(tank_cm).state < ${pump_min_cm};
+
+  # Set when the water that was pumped out did not come back by gravity.
+  # Blocks all further watering until cleared by hand.
+  - platform: template
+    name: "Drain fault"
+    device_class: problem
+    lambda: 'return id(drain_fault);'
+
+# -------------------------------------------------------------- outputs
+switch:
+  # Every relay board here is active LOW -> inverted: true
+  - platform: gpio
+    pin:
+      number: GPIO0
+      inverted: true
+    id: relay_light
+    name: "Grow light"
+    icon: mdi:led-strip-variant
+    restore_mode: RESTORE_DEFAULT_OFF
+
+  - platform: gpio
+    pin:
+      number: GPIO12
+      inverted: true
+    id: pump_fill
+    name: "Fill pump"
+    internal: true          # never expose an untimed pump to HA
+    restore_mode: ALWAYS_OFF
+    # Independent hard stop. Fires even if water_cycle hangs or crashes.
+    # It lives in a script rather than inline here so that a normal stop
+    # can cancel it: an inline delay cannot be called off, so it used to
+    # fire 130s after every ON regardless - harmless against an already
+    # stopped pump, but it would have cut a re-primed fill short, because
+    # the prime retry turns the pump OFF and back ON inside that window
+    # and the stale timer was still counting from the first ON.
+    on_turn_on:
+      - script.execute: pump_watchdog
+    on_turn_off:
+      - script.stop: pump_watchdog
+
+  # --- optional drain pump, only if gravity return proves too slow ---
+  # - platform: gpio
+  #   pin:
+  #     number: GPIO13
+  #     inverted: true
+  #   id: pump_drain
+  #   name: "Drain pump"
+  #   internal: true
+  #   restore_mode: ALWAYS_OFF
+  #   on_turn_on:
+  #     - delay: 240s
+  #     - switch.turn_off: pump_drain
+
+# ---------------------------------------------------------------- cycle
+script:
+  # mode: restart so that the prime retry's OFF/ON restarts the 130s from
+  # the new ON rather than leaving the first one running.
+  - id: pump_watchdog
+    mode: restart
+    then:
+      - delay: 130s
+      - switch.turn_off: pump_fill
+      - logger.log: "Fill pump watchdog fired"
+
+  # Closed loop on soil moisture. Each pass floods a fixed dose, lets it
+  # drain back by gravity, holds while the water wicks upward, then looks
+  # at the probe and decides whether to go again.
+  - id: water_cycle
+    mode: single
+    then:
+      - logger.log: "=== water cycle ==="
+      - component.update: dist_raw
+      - delay: 1s
+      - lambda: |-
+          id(level_at_start) = id(tank_cm).state;
+          id(dry_abort)  = false;
+          id(soak_done)  = false;
+          id(cycles_done) = 0;
+
+      - repeat:
+          count: !lambda 'return (uint32_t) id(max_cycles).state;'
+          then:
+            - if:
+                condition:
+                  and:
+                    - lambda: 'return !id(soak_done);'
+                    - lambda: 'return !id(dry_abort);'
+                    # Enough water left for a whole dose above the inlet.
+                    - lambda: |-
+                        return (id(tank_cm).state - id(dose_cm).state)
+                                   > ${pump_min_cm};
+                then:
+                  # ---- FLOOD: stop on dose reached, dry run, floor, or 120s
+                  - component.update: dist_raw
+                  - delay: 1s
+                  - lambda: |-
+                      id(pulse_start) = id(tank_cm).state;
+                      id(elapsed) = 0;
+                      id(prime_tries) = 0;
+                      id(cycles_done)++;
+                  - lambda: 'id(phase) = 1;'
+                  - switch.turn_on: pump_fill
+                  - while:
+                      condition:
+                        and:
+                          - switch.is_on: pump_fill
+                          - lambda: 'return id(elapsed) < 120;'
+                          - lambda: |-
+                              return (id(pulse_start) - id(tank_cm).state)
+                                     < id(dose_cm).state;
+                          # Absolute floor: never uncover the inlet,
+                          # whatever the dose says.
+                          - lambda: |-
+                              return id(tank_cm).state > ${pump_min_cm};
+                      then:
+                        - delay: 2s
+                        - lambda: 'id(elapsed) += 2;'
+                        - component.update: dist_raw
+                        # Nothing moved in 20s. Usually the pump has lost
+                        # its prime: the siphon empties the tube on every
+                        # drain, so the next start has to push a ~70cm
+                        # column of air, and a small centrifugal pump will
+                        # not self-prime against that. Observed on the real
+                        # rig 2026-09-18, where cycling the pump by hand
+                        # fixed it - water falls back into the housing and
+                        # it catches. So retry that, and only give up if it
+                        # still will not prime.
+                        - if:
+                            condition:
+                              lambda: |-
+                                return id(elapsed) >= 20 &&
+                                       (id(pulse_start) - id(tank_cm).state)
+                                       < 0.3f;
+                            then:
+                              - if:
+                                  condition:
+                                    lambda: 'return id(prime_tries) < 3;'
+                                  then:
+                                    - lambda: |-
+                                        id(prime_tries)++;
+                                        id(phase) = 4;
+                                        ESP_LOGW("cycle",
+                                                 "no flow - re-priming (%d/3)",
+                                                 id(prime_tries));
+                                    - switch.turn_off: pump_fill
+                                    - delay: 3s
+                                    - switch.turn_on: pump_fill
+                                    - lambda: 'id(phase) = 1;'
+                                    - component.update: dist_raw
+                                    - delay: 1s
+                                    - lambda: |-
+                                        id(pulse_start) = id(tank_cm).state;
+                                        id(elapsed) = 0;
+                                  else:
+                                    - logger.log: "3 prime attempts failed - abort"
+                                    - lambda: 'id(dry_abort) = true;'
+                                    - switch.turn_off: pump_fill
+                  - switch.turn_off: pump_fill
+                  - lambda: |-
+                      ESP_LOGI("cycle", "cycle %d: flooded %.1f cm in %d s",
+                               id(cycles_done),
+                               id(pulse_start) - id(tank_cm).state,
+                               id(elapsed));
+
+                  # ---- GRAVITY RETURN. The pump is simply off.
+                  # Each drain-down is what aerates the root zone.
+                  # - switch.turn_on: pump_drain    # optional booster
+                  # - delay: 180s
+                  # - switch.turn_off: pump_drain
+                  - lambda: 'id(phase) = 2;'
+                  - delay: ${drain_wait}
+
+                  # ---- let it wick upward before believing the probe
+                  - lambda: 'id(phase) = 3;'
+                  - delay: ${soak_hold}
+                  - component.update: soil_raw
+                  - delay: 2s
+                  - lambda: |-
+                      if (id(soil_pct).has_state() &&
+                          id(soil_pct).state >= id(moist_target).state) {
+                        id(soak_done) = true;
+                        ESP_LOGI("cycle", "soil %.0f%% >= target, stopping",
+                                 id(soil_pct).state);
+                      } else {
+                        ESP_LOGI("cycle", "soil %.0f%%, another cycle",
+                                 id(soil_pct).has_state()
+                                     ? id(soil_pct).state : -1.0f);
+                      }
+
+      # ---- did all the water come back?
+      - lambda: 'id(phase) = 0;'
+      - component.update: dist_raw
+      - delay: 1s
+      - lambda: |-
+          float missing = id(level_at_start) - id(tank_cm).state;
+          if (id(dry_abort)) {
+            ESP_LOGE("cycle", "aborted: pump would not prime");
+          } else if (id(cycles_done) == 0) {
+            ESP_LOGW("cycle", "no cycles run - not enough water above pump");
+          } else if (missing > id(dose_cm).state * 0.4f) {
+            id(drain_fault) = true;
+            ESP_LOGE("cycle", "%.1f cm never returned - DRAIN FAULT", missing);
+          } else {
+            id(drain_fault) = false;
+            ESP_LOGI("cycle", "done after %d cycles, %.1f cm short",
+                     id(cycles_done), missing);
+          }
+          id(lockout_until) = id(sntp_time).now().timestamp +
+                              (int)(id(lockout_h).state * 3600);
+
+interval:
+  # NO light schedule here on purpose. Home Assistant owns the
+  # photoperiod (18h: on 06:00, off 00:00) so that a manual toggle at
+  # bedtime sticks instead of being undone within the minute. The device
+  # used to enforce it every 60s; that was correct for autonomy and wrong
+  # for control, and control won because the user is in the room.
+  # Consequences, accepted deliberately:
+  #   - if Home Assistant is down the lights hold whatever state they are in
+  #   - CORRECTION 2026-09-18: an earlier version of this comment claimed
+  #     RESTORE_DEFAULT_OFF leaves the lamp off after a reboot. It does
+  #     not. It restores the state saved in flash and falls back to off
+  #     only when there is no saved state - i.e. after a fresh flash, not
+  #     after an ordinary reset. Measured: across four resets tonight HA
+  #     saw the lamp come back `on` every time, with no `off` row at any
+  #     reconnect. So the HA automation's device-online trigger is a
+  #     safety net for the post-flash case only, not the thing that keeps
+  #     the photoperiod correct across a reboot - the device already does.
+  - interval: 10min
+    then:
+      - if:
+          condition:
+            and:
+              - lambda: 'return !id(drain_fault);'
+              - lambda: |-
+                  return id(sntp_time).now().is_valid() &&
+                         id(sntp_time).now().timestamp > id(lockout_until);
+              - lambda: |-
+                  return id(soil_pct).has_state() &&
+                         id(soil_pct).state < id(moist_threshold).state;
+              - lambda: |-
+                  return id(tank_cm).has_state() &&
+                         (id(tank_cm).state - id(dose_cm).state)
+                             > ${pump_min_cm};
+          then:
+            - script.execute: water_cycle
+
+button:
+  - platform: template
+    name: "Water now"
+    icon: mdi:watering-can
+    on_press:
+      - script.execute: water_cycle
+
+  # --- manual dose calibration -------------------------------------------
+  # Press "start", watch the tray, press "save" the moment the water reaches
+  # the level you want. The tank drop between the two presses becomes Dose.
+  # The fill watchdog still caps this at 130s.
+  - platform: template
+    name: "Calibrate: start fill"
+    icon: mdi:ruler
+    entity_category: config
+    on_press:
+      - component.update: dist_raw
+      - delay: 1s
+      - lambda: 'id(cal_start) = id(tank_cm).state;'
+      - logger.log: "Calibrating - press 'save dose' when the tray is flooded"
+      - switch.turn_on: pump_fill
+
+  - platform: template
+    name: "Calibrate: save dose"
+    icon: mdi:content-save-cog
+    entity_category: config
+    on_press:
+      - switch.turn_off: pump_fill
+      - component.update: dist_raw
+      - delay: 1s
+      - lambda: |-
+          float drop = id(cal_start) - id(tank_cm).state;
+          if (drop < 0.2f) {
+            ESP_LOGW("cal", "only %.2f cm moved - not saved", drop);
+          } else if (drop > 10.0f) {
+            ESP_LOGW("cal", "%.2f cm exceeds the Dose maximum", drop);
+          } else {
+            auto call = id(dose_cm).make_call();
+            call.set_value(drop);
+            call.perform();
+            ESP_LOGI("cal", "dose set to %.1f cm", drop);
+          }
+
+  - platform: template
+    name: "Clear drain fault"
+    icon: mdi:alert-remove
+    entity_category: config
+    on_press:
+      - lambda: 'id(drain_fault) = false;'
+
+# -------------------------------------------------------------- display
+font:
+  - file: "gfonts://Roboto"
+    id: f_s
+    size: 12
+  - file: "gfonts://Roboto"
+    id: f_m
+    size: 18
+  - file: "gfonts://Roboto"
+    id: f_l
+    size: 26
+
+display:
+  - platform: ssd1306_i2c
+    model: "SSD1306 128x64"
+    address: 0x3C
+    id: oled
+    # Panel is mounted on its side. Layout below is 64 wide x 128 tall.
+    rotation: 90
+    # 500ms. The earlier 250ms was there to drive a 2Hz full-screen invert;
+    # that cue is gone (see below) so the refresh can be halved. A lit
+    # SSD1306 draws ~25-30mA all-on against ~6mA for text, and toggling
+    # that twice a second tugs the 3V3 rail hard enough to show up as ADC
+    # noise and ultrasonic jitter - a plausible cause of the API drop
+    # observed mid-flood on 2026-09-18.
+    update_interval: 500ms
+    lambda: |-
+      // Portrait, 64 x 128. Three states, each drawn on its own; the cheap
+      // attention cue is a 2px outer frame plus one inverted badge rather
+      // than inverting the whole panel every frame.
+      auto pct = [](float v) { return v < 0 ? 0 : (v > 100 ? 100 : v); };
+
+      // ---- DARK PERIOD: follow the grow light --------------------------
+      // Nobody is looking at the box while the lamps are off, and an OLED
+      // is the one light source in here that stays on all night. Drawing
+      // nothing leaves every pixel off, which on an OLED is genuinely dark
+      // and drops the panel to roughly the controller's own draw - there is
+      // no backlight to leak.
+      // Two deliberate exceptions, because a blank screen must never hide
+      // something that needs a human: a latched fault, and a cycle in
+      // progress. Both fall through to their own screens below.
+      if (!id(relay_light).state && !id(drain_fault) && id(phase) == 0)
+        return;
+
+      // ---- FAULT: dominates everything ---------------------------------
+      if (id(drain_fault)) {
+        it.rectangle(0, 0, 64, 128);
+        it.rectangle(1, 1, 62, 126);
+        it.filled_rectangle(3, 3, 58, 23);
+        it.print(32, 6, id(f_m), COLOR_OFF, TextAlign::TOP_CENTER, "! STOP");
+        it.print(32, 36, id(f_m), TextAlign::TOP_CENTER, "DRAIN");
+        it.print(32, 56, id(f_m), TextAlign::TOP_CENTER, "FAULT");
+        it.line(6, 78, 58, 78);
+        it.print(32, 84, id(f_s), TextAlign::TOP_CENTER, "PUMP OFF");
+        it.print(32, 98, id(f_s), TextAlign::TOP_CENTER, "NO RETURN");
+        it.print(32, 112, id(f_s), TextAlign::TOP_CENTER, "CHECK TRAY");
+        return;
+      }
+
+      // ---- RUNNING: readable across the room ---------------------------
+      if (id(phase) != 0) {
+        const char *verb = "";
+        switch (id(phase)) {
+          case 1: verb = "FILL";  break;
+          case 2: verb = "DRAIN"; break;
+          case 3: verb = "SOAK";  break;
+          case 4: verb = "PRIME"; break;
+        }
+        it.rectangle(0, 0, 64, 128);
+        it.rectangle(1, 1, 62, 126);
+        it.filled_rectangle(4, 4, 56, 17);
+        it.printf(32, 5, id(f_s), COLOR_OFF, TextAlign::TOP_CENTER,
+                  "CYC %d/%d", id(cycles_done), (int) id(max_cycles).state);
+        it.print(32, 28, id(f_m), TextAlign::TOP_CENTER, verb);
+        it.line(4, 52, 60, 52);
+
+        it.print(32, 56, id(f_s), TextAlign::TOP_CENTER, "SOIL");
+        if (id(soil_pct).has_state())
+          it.printf(32, 68, id(f_m), TextAlign::TOP_CENTER, "%.0f%%",
+                    id(soil_pct).state);
+        else
+          it.print(32, 68, id(f_m), TextAlign::TOP_CENTER, "--");
+
+        if (id(tank_pct).has_state()) {
+          it.printf(32, 90, id(f_s), TextAlign::TOP_CENTER, "TANK %.0f%%",
+                    id(tank_pct).state);
+          it.rectangle(6, 106, 52, 9);
+          int w = (int) (pct(id(tank_pct).state) * 48.0f / 100.0f);
+          if (w > 0) it.filled_rectangle(8, 108, w, 5);
+        }
+        return;
+      }
+
+      // ---- IDLE --------------------------------------------------------
+      it.strftime(2, 1, id(f_s), TextAlign::TOP_LEFT, "%H:%M",
+                  id(sntp_time).now());
+      if (id(relay_light).state) it.filled_circle(56, 7, 4);
+      else                       it.circle(56, 7, 4);
+      it.line(0, 14, 64, 14);
+
+      it.print(32, 17, id(f_s), TextAlign::TOP_CENTER, "SOIL");
+      if (id(soil_pct).has_state())
+        it.printf(32, 28, id(f_l), TextAlign::TOP_CENTER, "%.0f%%",
+                  id(soil_pct).state);
+      else
+        it.print(32, 28, id(f_l), TextAlign::TOP_CENTER, "--");
+      it.line(0, 58, 64, 58);
+
+      if (id(tank_pct).has_state()) {
+        // Stacked like the SOIL block above, and for the same reason.
+        // Label-left + value-right does not fit: "TANK" in the 12px font
+        // runs to x=32, while the value in the 18px font right-aligned at
+        // x=62 starts at x=29 for "98%" and x=19 for "100%" - so it was
+        // already touching at 98% and would have overprinted the label
+        // outright once the tank read full. Centring both sidesteps the
+        // width question entirely, at any number of digits.
+        it.print(32, 59, id(f_s), TextAlign::TOP_CENTER, "TANK");
+        it.printf(32, 70, id(f_m), TextAlign::TOP_CENTER, "%.0f%%",
+                  id(tank_pct).state);
+        it.rectangle(6, 88, 52, 8);
+        int w = (int) (pct(id(tank_pct).state) * 48.0f / 100.0f);
+        if (w > 0) it.filled_rectangle(8, 90, w, 4);
+      }
+      it.line(0, 96, 64, 96);
+
+      if (id(box_temp).has_state())
+        it.printf(32, 100, id(f_s), TextAlign::TOP_CENTER, "%.1f C",
+                  id(box_temp).state);
+      if (id(box_rh).has_state())
+        it.printf(32, 113, id(f_s), TextAlign::TOP_CENTER, "%.0f%% RH",
+                  id(box_rh).state);
