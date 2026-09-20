@@ -2,9 +2,14 @@
 
 **English** · [繁體中文](README.zh-TW.md)
 
-![The grow-box: a terracotta pot of basil seedlings sitting in the mouth of a translucent plastic bucket reservoir, rim sealed with foil and tape, under four ring-light lamps on gooseneck stalks clamped to a shelf edge. To the left, a NodeMCU ESP8266 on perfboard with an SSD1306 OLED and a blue 4-channel relay module. Below the shelf, a black tub holding a second board on its lid. The OLED reads 12:41, SOIL 100%, TANK -0.0%, 28.0 C 65% RH.](docs/img/rig-hero.jpg)
+![The grow-box: a terracotta pot of basil seedlings sitting in the mouth of a translucent plastic bucket reservoir, the pot rim wrapped in perforated aluminium foil as a fungus-gnat barrier, under four ring-light lamps on gooseneck stalks clamped to a shelf edge. To the left, a NodeMCU ESP8266 on perfboard with an SSD1306 OLED and a blue 4-channel relay module. Below the shelf, a black tub holding a second board on its lid. The OLED reads 12:41, SOIL 100%, TANK -0.0%, 28.0 C 65% RH.](docs/img/rig-hero.jpg)
 
-*The rig as built. Seedlings are visibly leggy — long pale stems, sparse leaves — a symptom the [grow-light section](#grow-light-and-why-the-schedule-lives-in-home-assistant-not-firmware) below has a measured explanation for. The `TANK -0.0%` reading is real and unexplained; see the [known issues](#known-issues--open) section.*
+*The rig as built, 2026-09-20. The foil around the pot is a fungus-gnat
+barrier, not a seal — see [why perforation still works](#fungus-gnat-control-part-2-perforated-foil) below.
+Seedlings are visibly leggy — long pale stems, sparse leaves — a symptom the
+[grow-light section](#grow-light-and-why-the-schedule-lives-in-home-assistant-not-firmware)
+below has a measured explanation for. The `TANK -0.0%` reading is real and
+unexplained; see the [known issues](#known-issues--open) section.*
 
 Indoor basil, zero natural light, bottom-watered by ebb and flow: a pump floods
 the outer tray, the water drains back to the reservoir by gravity, and an
@@ -49,8 +54,9 @@ Full connection-by-connection wiring, including the pre-power-on checklist, is
 in [`docs/WIRING.txt`](docs/WIRING.txt) (bilingual, diagrams in monospace ASCII).
 Note: `docs/WIRING.txt` quotes a geometric cross-section (~143 cm²) computed
 from the tub's rim radius alone; the firmware uses the measured figure
-(~130 cm²/cm) instead, since the tub tapers toward the base and the measured
-value is the one that actually matches how much the level moves per litre.
+(~130 cm², i.e. 1cm of level change ≈ 130 ml) instead, since the tub tapers
+toward the base and the measured value is the one that actually matches how
+much the level moves per litre.
 
 ## Wiring / pinout
 
@@ -162,13 +168,63 @@ still dry.
   level hasn't moved in 20 seconds, the pump is cut for 3 seconds — letting
   water fall back and re-flood the impeller housing — then restarted. Up to
   three tries before the cycle aborts as a dry run.
-- **Fungus gnat control via the moisture setpoints.** `Stop at` moved 70% →
-  55% and `Water below` moved 30% → 22% (2026-09-20): the soil probe sits near
-  the surface, so these numbers are effectively an instruction for how wet to
-  keep the top few centimetres — which is the entire habitat of *Sciaridae*
-  larvae. The root zone stays saturated from bottom watering either way; only
-  the surface is deliberately kept drier, and a dry spell of 4–5 days breaks a
-  3–4 day gnat generation cycle instead of just slowing it down.
+- **Fungus gnat control, part 1: the moisture setpoints.** `Stop at` moved
+  70% → 55% and `Water below` moved 30% → 22% (2026-09-20): the soil probe
+  sits near the surface, so these numbers are effectively an instruction for
+  how wet to keep the top few centimetres — which is the entire habitat of
+  *Sciaridae* larvae. The root zone stays saturated from bottom watering
+  either way; only the surface is deliberately kept drier, and a dry spell of
+  4–5 days breaks a 3–4 day gnat generation cycle instead of just slowing it
+  down. The tradeoff is stated plainly right in the firmware comment: raise
+  the threshold back if the plant itself starts to wilt — the basil is the
+  point, the gnats are a nuisance.
+
+### Fungus gnat control, part 2: perforated foil
+
+| Before | After |
+|---|---|
+| ![Earlier state of the pot, no foil: bushy young basil seedlings growing directly out of visible dark potting soil, a small white sensor connector clipped to the pot rim, in a bucket reservoir with no cover on the soil.](docs/img/rig-earlier.jpg) | ![The pot rim wrapped in perforated aluminium foil, sealed tight around each stem, from the hero photo above.](docs/img/rig-hero.jpg) |
+| Bare soil surface | Foil barrier, fitted 2026-09-20 |
+
+Same day as the setpoint change, a second and more direct measure went in:
+the soil surface is now covered in **perforated aluminium foil**, denying
+gnats the moist bare surface they lay eggs into. It replaced an earlier
+bread/potato-slice larval trap.
+
+The obvious objection is that any cover should stop evaporation, keep the
+surface wet, blind the near-surface probe, and so stop `Water below` from
+ever firing again. **That objection does not survive perforation.** Diffusion
+through a small opening scales with its *radius*, not its area — a standard
+result for diffusion through a small aperture: *N* holes give a flux
+proportional to *N·r*, while the open area is
+only *N·π·r²* — so many fine holes evaporate far better than their tiny
+total area suggests. Leaves do exactly this: stomata are roughly 1% of leaf
+area and pass about 50% of open-water evaporation. This is the reasoning that
+justified trying it, not a guarantee — it's the idealized case of isolated,
+well-spaced apertures, and the verification below is what actually settles
+it on this specific pot rather than the theory alone.
+
+- **Hole size is the real design constraint, and it's about the insect, not
+  the water:** holes ≤1mm (pin or drawing-pin). At 2mm and up an adult gnat
+  walks straight through and the barrier is decorative. The genuine weak
+  point is the stem openings — those are necessarily large, and a single gap
+  there voids the whole sheet, so each one is folded or taped tight around
+  its stem.
+- **Bonus effects:** the foil reflects light back up into the canopy, and
+  shades the surface enough that algae — gnat food in its own right — can't
+  establish.
+- **Free, falsifiable verification.** `sensor.basil_soil_voltage` / soil % is
+  already logged continuously, so the check costs nothing: watch it over the
+  following days. If it still falls past `Water below` (22%) the way it did
+  before the foil went on, evaporation is adequate and nothing needs
+  changing. If it plateaus around 30% and stops moving, the perforation is
+  too sparse — the fix is more holes, not removing the foil.
+- **A real hazard worth stating plainly:** foil is electrically conductive,
+  and the relay board and 12V rail sit right next to the pot. It's secured
+  for that reason — a loose piece landing on a terminal is a genuine failure
+  mode in this build, not a theoretical one. The same conductivity is also
+  kept clear of the soil probe's own exposed header pins, for the same
+  reason.
 
 ## Safety interlocks
 
@@ -210,8 +266,9 @@ or reasoned through during the build.
   gravity drains the tray back down on its own; there is no drain pump or
   H-bridge to fail in the wrong direction. A welded relay contact is the one
   failure this can't protect against on its own, which is why the tray also
-  has a **mandatory overflow port** back to the tank, sized for the ~10:1
-  volume ratio between the two vessels (~2.3 L tank vs ~200 ml usable tray).
+  has a **mandatory overflow port** back to the tank, sized for the fact that
+  the tank holds roughly ten times what the tray can (~2.3 L tank vs ~200 ml
+  usable tray).
 
 ## Grow light, and why the schedule lives in Home Assistant, not firmware
 
@@ -325,11 +382,36 @@ A planned bulk-capacitor mod (470µF + 0.1µF across 3V3) was designed and then
 voltage problem the data didn't support.
 
 **Heap was suspected first, and the evidence turned out to say the opposite.**
-The three heap samples immediately before one crash were the *healthiest of
-the night*: `free=6816 B, max_block=11600 B, frag=4%`. Almost 7 kB free with
-an 11.6 kB contiguous block is not what an allocation failure looks like —
-this reading directly contradicted the heap-starvation theory and retracted
-it.
+The cleanest form of the argument needs only two numbers: over 27 minutes of
+routine sampling the device sat at **4.0-4.7 kB free** with no downward
+trend, and then it crashed with *more* headroom than that entire stretch —
+**6.8 kB free**. If exhaustion were the mechanism, the crash belonged in the
+low stretch, not above it.
+
+The recorder line quoted in the original notes deserves a caveat, because it
+is a good lesson in its own right:
+
+```
+00:14:11  free=12000  block= 2992  frag=43%   just booted
+00:14:30  free= 7152  block=11632  frag= 4%
+00:15:00  free= 6872  block= 3408  frag=44%
+00:16:20  free= 6816  block=11600  frag= 4%   <- the sample that got quoted
+```
+
+`block` is the largest contiguous free block, so it **cannot exceed** `free`.
+Those last two columns do not belong to that `free` reading. The watcher joins
+three independently-updating Home Assistant sensors and seeds each from its
+last known value rather than waiting for a synchronised tick - deliberately,
+because an earlier version silently collected nothing for 45 minutes waiting
+for a sensor that had been byte-identical for over an hour. The cost of that
+choice is visible here: `block=11600 / frag=4%` was measured just after boot,
+when free really was around 12 kB, and only propagated once `free` had already
+fallen to 6.8 kB as Home Assistant re-attached.
+
+So the true reading is *more* favourable to the conclusion, not less - at the
+moment the block was measured the heap was almost entirely contiguous. But any
+single line of that log pairs values captured at different instants, and should
+not be quoted as one instantaneous state.
 
 **Actual cause, confirmed by direct causal evidence:** a *second* API client
 attempting a Noise handshake while one was already attached crashes the
@@ -358,6 +440,16 @@ else is measured against.
 found all of this — heap sensors, reset-reason reporting — cost about 655 B,
 roughly 0.8% of total RAM. On a device with 3–4 kB free, that's a fifth of the
 remaining headroom. Measuring the edge moved the edge.
+
+**A second, unrelated lesson came out of the recorder that collected all this
+data, not the device itself.** It originally ran under a service manager's
+"always restart" policy, driven by a script with its own hard end time. Once
+that deadline passed, the script would exit cleanly, the service manager
+would relaunch it, it would see the deadline already behind it, and exit
+again — every few seconds, forever, a restart loop dressed up as a healthy
+service. Fixed by switching to "restart on failure only." The general rule:
+an always-restart policy belongs on something meant to run forever, not on a
+job that has a horizon.
 
 ## Known issues / open
 
@@ -397,6 +489,12 @@ This device is not "done." What's genuinely settled and what isn't:
 - **Not yet observed in production:** a full "dawn" half-cycle of the current
   Home Assistant light schedule (dusk was verified; dawn had not fired yet as
   of the last recorded check).
+- **Not yet checked:** whether the gnat-control dry-down (soil pulled down to
+  22% between waterings) changes how the *following* cycle behaves. A more
+  parched pot plausibly absorbs more water on rewetting than the ~247 ml
+  baseline this document's dose figures are built on, which is exactly the
+  kind of shift that could nudge the drain-fault math. No measurement exists
+  yet either way.
 
 ## Build / flash / OTA
 
@@ -419,6 +517,26 @@ There is no OTA password on this device by design: the tradeoff made here is
 that losing access to the source tree (and thus the password) is judged more
 likely than someone else on the LAN pushing firmware. Recovery without a
 password means opening the box and flashing over USB.
+
+**OTA also has to respect the one-API-client rule above, and the measured
+procedure is worth stating exactly** because getting the timing wrong costs
+an OTA attempt, not just a connection retry: block Home Assistant's
+connection to the device first, wait for its side of the socket to clear
+(~80s), then wait a *further* ~2 minutes for the device's own keepalive on
+that dropped connection to expire before uploading — connecting inside that
+second window still counts as a second client and can reset the device
+mid-upload. Done in that order, a real upload completed in **18.34 seconds,
+clean, first try** — against two failed attempts the night before (61% and
+16% progress) while HA was still attached. Lift whatever block you used
+immediately after, and check the next light-schedule boundary before opening
+that window at all, since Home Assistant loses control of the relay for as
+long as it's blocked.
+
+Treat that ~2-minute figure as the shortest wait that has actually worked,
+not a guaranteed threshold: a separate measurement elsewhere in this project
+recorded a reset when a client connected exactly three minutes after the
+other side's socket had cleared. The two data points don't fully agree on
+where the safe line is — when in doubt, wait longer than 2 minutes.
 
 `basil-bench.yaml` is a separate, superseded build kept for reference: sensors
 and a local web UI, no relays, no pump, no WiFi — used to read off calibration
