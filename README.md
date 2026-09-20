@@ -2,14 +2,26 @@
 
 **English** · [繁體中文](README.zh-TW.md)
 
+> [!WARNING]
+> **Automatic watering is suspended as of 2026-09-20.** The HC-SR04 has stopped
+> reading and the board no longer boots with it connected. With no tank level,
+> both the pump-submersion floor (`pump_min_cm`) and the drain-fault check are
+> blind — two safety interlocks down, not a cosmetic gap. Mitigation is to drop
+> `Water below` to 10 in Home Assistant, which needs no contact with the device.
+> Details in [Known issues](#known-issues--open).
+
 ![The grow-box: a terracotta pot of basil seedlings sitting in the mouth of a translucent plastic bucket reservoir, the pot rim wrapped in perforated aluminium foil as a fungus-gnat barrier, under four ring-light lamps on gooseneck stalks clamped to a shelf edge. To the left, a NodeMCU ESP8266 on perfboard with an SSD1306 OLED and a blue 4-channel relay module. Below the shelf, a black tub holding a second board on its lid. The OLED reads 12:41, SOIL 100%, TANK -0.0%, 28.0 C 65% RH.](docs/img/rig-hero.jpg)
 
 *The rig as built, 2026-09-20. The foil around the pot is a fungus-gnat
 barrier, not a seal — see [why perforation still works](#fungus-gnat-control-part-2-perforated-foil) below.
 Seedlings are visibly leggy — long pale stems, sparse leaves — a symptom the
 [grow-light section](#grow-light-and-why-the-schedule-lives-in-home-assistant-not-firmware)
-below has a measured explanation for. The `TANK -0.0%` reading is real and
-unexplained; see the [known issues](#known-issues--open) section.*
+below has a measured explanation for. The `TANK -0.0%` reading is real. This
+photo was taken at 12:41, after the tank sensor's last good reading at 10:46
+that morning, so it most likely shows the fault described in
+[Known issues](#known-issues--open) rather than a separate mystery — though the
+firmware clamps that percentage to 0-100, so a negative value is still not
+fully accounted for.*
 
 Indoor basil, zero natural light, bottom-watered by ebb and flow: a pump floods
 the outer tray, the water drains back to the reservoir by gravity, and an
@@ -457,6 +469,50 @@ an always-restart policy belongs on something meant to run forever, not on a
 job that has a horizon.
 
 ## Known issues / open
+
+> [!WARNING]
+> **Active fault, 2026-09-20: the HC-SR04 stopped reading, and the board no
+> longer boots with it connected.** Automatic watering stays off until this is
+> resolved — with no tank level, `pump_min_cm` and the drain-fault check are
+> both blind.
+
+**Firmware is excluded — by timeline, not by argument.** This is worth stating
+plainly because the first instinct was that recent firmware changes had broken
+it, and that instinct was wrong. The current build was flashed at 00:58 and the
+sensor read a steady **7.82-7.85 cm continuously until 10:24**, 9.5 hours later.
+It went unavailable during a session of physical work, gave one last good
+reading at **10:46:02**, and has produced nothing since — while the device
+itself stays up (2.9 h uptime at 13:39). Same binary either side of a hardware
+intervention, so the revisions cannot be the cause. A recorder running on the
+Pi settled in one query what would otherwise have been an afternoon of bisecting
+firmware.
+
+**Working hypothesis — NOT confirmed: the module has failed in a way that loads
+TRIG.** One fault would explain both symptoms at once. A module leaking current
+on TRIG holds GPIO2 low at reset, which turns the long-documented "marginal but
+usually boots" strapping hazard on D4/GPIO2 into a consistent boot failure; and
+a dead module also returns no echo when hot-plugged after boot. Parsimonious,
+and untested — it is a hypothesis, not a diagnosis.
+
+Three measurements would settle it, cheapest first:
+
+1. Power off and meter D4/GPIO2 to GND with the module attached. A healthy
+   HC-SR04 TRIG input is high-impedance, >100 kΩ; a few kΩ means the module is
+   dragging it.
+2. Meter the module's VCC to GND while running — expect 5 V.
+3. Substitute a known-good HC-SR04. Both the fastest test and, if the
+   hypothesis holds, the fix.
+
+Also worth checking: the ECHO 1k/2k divider for a pulled wire, and whether the
+aluminium foil fitted the same morning touched a terminal. The foil hazard noted
+above is not hypothetical — it is conductive, and it sits next to the relay
+board and the 12 V rail.
+
+If the wiring is opened to swap the module anyway, this is the moment to take
+the clean fix the YAML already documents: **move TRIG from D4/GPIO2 to
+D0/GPIO16.** The strapping hazard was an accepted design compromise, and it has
+now bitten.
+
 
 This device is not "done." What's genuinely settled and what isn't:
 
