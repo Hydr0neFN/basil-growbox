@@ -388,6 +388,11 @@ trend, and then it crashed with *more* headroom than that entire stretch —
 **6.8 kB free**. If exhaustion were the mechanism, the crash belonged in the
 low stretch, not above it.
 
+The same point lands from the other side once the `captive_portal` fix below
+is in view: with that cut in place the device settled at **6.2-6.9 kB free**
+and ran **12.8 hours straight** there. The 6816 B crash sits inside that band
+— it happened at a heap level the device had already held for half a day.
+
 The recorder line quoted in the original notes deserves a caveat, because it
 is a good lesson in its own right:
 
