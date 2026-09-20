@@ -2,14 +2,6 @@
 
 **English** · [繁體中文](README.zh-TW.md)
 
-> [!WARNING]
-> **Automatic watering is suspended as of 2026-09-20.** The HC-SR04 has stopped
-> reading and the board no longer boots with it connected. With no tank level,
-> both the pump-submersion floor (`pump_min_cm`) and the drain-fault check are
-> blind — two safety interlocks down, not a cosmetic gap. Mitigation is to drop
-> `Water below` to 10 in Home Assistant, which needs no contact with the device.
-> Details in [Known issues](#known-issues--open).
-
 ![The grow-box: a terracotta pot of basil seedlings sitting in the mouth of a translucent plastic bucket reservoir, the pot rim wrapped in perforated aluminium foil as a fungus-gnat barrier, under four ring-light lamps on gooseneck stalks clamped to a shelf edge. To the left, a NodeMCU ESP8266 on perfboard with an SSD1306 OLED and a blue 4-channel relay module. Below the shelf, a black tub holding a second board on its lid. The OLED reads 12:41, SOIL 100%, TANK -0.0%, 28.0 C 65% RH.](docs/img/rig-hero.jpg)
 
 *The rig as built, 2026-09-20. The foil around the pot is a fungus-gnat
@@ -479,43 +471,50 @@ job that has a horizon.
 
 ## Known issues / open
 
-> [!WARNING]
-> **Active fault, 2026-09-20: the HC-SR04 stopped reading, and the board no
-> longer boots with it connected.** Automatic watering stays off until this is
-> resolved — with no tank level, `pump_min_cm` and the drain-fault check are
-> both blind.
+### A three-hour outage that was a loose connector — and what it accidentally measured
 
-**Firmware is excluded — by timeline, not by argument.** This is worth stating
-plainly because the first instinct was that recent firmware changes had broken
-it, and that instinct was wrong. The current build was flashed at 00:58 and the
-sensor read a steady **7.82-7.85 cm continuously until 10:24**, 9.5 hours later.
-It went unavailable during a session of physical work, gave one last good
-reading at **10:46:02**, and has produced nothing since — while the device
-itself stays up (2.9 h uptime at 13:39). Same binary either side of a hardware
-intervention, so the revisions cannot be the cause. A recorder running on the
-Pi settled in one query what would otherwise have been an afternoon of bisecting
-firmware.
+On 2026-09-20 the HC-SR04 stopped reading and the board would not boot with it
+connected. It was a **loose DuPont connector**, reseated at 13:46, and the
+sensor came back immediately. The write-up survives because two things it
+produced are worth more than the fault was.
 
-**Working hypothesis — NOT confirmed: the module has failed in a way that loads
-TRIG.** One fault would explain both symptoms at once. A module leaking current
-on TRIG holds GPIO2 low at reset, which turns the long-documented "marginal but
-usually boots" strapping hazard on D4/GPIO2 into a consistent boot failure; and
-a dead module also returns no echo when hot-plugged after boot. Parsimonious,
-and untested — it is a hypothesis, not a diagnosis.
+**Firmware was excluded by timeline, not by argument.** The first instinct was
+that recent firmware changes had broken it. The build flashed at 00:58 read a
+steady **7.82-7.85 cm continuously until 10:24** — 9.5 hours. It went
+unavailable during a session of physical work, gave one last good reading at
+**10:46:02**, and produced nothing after, while the device itself stayed up.
+Same binary either side of a hardware intervention, so the revisions could not
+be the cause. A recorder on the Pi settled in one query what would otherwise
+have been an afternoon of bisecting firmware.
 
-Three measurements would settle it, cheapest first:
+**The proof it was only ever the connection is unusually clean:**
 
-1. Power off and meter D4/GPIO2 to GND with the module attached. A healthy
-   HC-SR04 TRIG input is high-impedance, >100 kΩ; a few kΩ means the module is
-   dragging it.
-2. Meter the module's VCC to GND while running — expect 5 V.
-3. Substitute a known-good HC-SR04. Both the fastest test and, if the
-   hypothesis holds, the fix.
+```
+10:46:02  last good      7.82039976119995 cm   95.1166687011719 %
+13:46:47  after reseat   7.82039976119995 cm   95.1166687011719 %
+```
 
-Two suspects have since been ruled out. The ECHO 1k/2k divider is **SMD 0805,
-soldered**, not flying leads, so a pulled divider wire is not in play; suspicion
-narrows to the module, its DuPont connector, or the three wires. And the
-aluminium foil did **not** touch anything near the HC-SR04.
+Bit-for-bit identical, three hours apart. The water level had not moved and the
+sensor had not drifted.
+
+**And that identity measured something that had only been reasoned.** The
+section below argues that with the tank sensor reading NaN, every pump gate
+compares false and no watering can run. That was inference. Three hours of an
+unchanged water level, to the last digit, is evidence: no cycle ran in that
+window. Inference at 13:00, measurement at 13:46.
+
+A working hypothesis was recorded during the outage — that the module had
+failed in a way that loaded TRIG, which would have explained the read failure
+and the boot failure with one fault. **It is retracted.** It was parsimonious
+and wrong; the connector was on the same suspect list and was the cheapest item
+on it. Note what that means for the boot symptom: it is **not** explained by a
+loaded TRIG, and remains the original GPIO2 strapping hazard. A loose connector
+plausibly makes that hazard surface more readily, but that is not established
+and should not be written as though it were.
+
+Two other suspects were ruled out along the way. The ECHO 1k/2k divider is
+**SMD 0805, soldered**, not flying leads, so a pulled divider wire was never in
+play. And the aluminium foil did **not** touch anything near the HC-SR04.
 
 ### The display was printing `-nan%`, and three guards let it through
 
@@ -539,20 +538,21 @@ else-branch it never had — previously a dead tank drew nothing at all, which
 reads as a broken screen rather than a broken sensor. Config validates; not yet
 flashed.
 
-### The rig is currently safe by accident, not by design
+### With the tank sensor dead the rig was safe by accident, not by design
 
-This is the part worth stating plainly, because it is exactly the kind of thing
-a later, well-meaning "fix NaN handling" could turn into a fail-open.
+Worth stating plainly, because it is exactly the kind of thing a later,
+well-meaning "fix NaN handling" could turn into a fail-open.
 
 Every pump gate is a comparison against `tank_cm` — the pre-cycle check
 (`(tank_cm - dose_cm) > pump_min_cm`) and the in-loop floor (`tank_cm >
-pump_min_cm`). **Every comparison against NaN is false**, so neither gate can
-ever pass: no cycle starts, and a running one could not continue. With the
-sensor dead the pump *cannot* run.
+pump_min_cm`). **Every comparison against NaN is false**, so neither gate could
+pass: no cycle could start, and a running one could not continue. With the
+sensor dead the pump simply could not run — and the bit-identical water level
+three hours later confirms none did.
 
 The same semantics silently disable the tank-empty alert, which is the mirror
-image of the same fact: there is no level protection at present, only inaction.
-Safe, but for a reason nobody designed.
+image of the same fact: during the outage there was no level protection at all,
+only inaction. Safe, but for a reason nobody designed.
 
 **One more consequence, on a different sensor.** The foil did touch the
 **capacitive soil probe**. That damages nothing, but a conductive sheet against
@@ -561,10 +561,11 @@ toward wet. Any soil percentage taken in that state is unusable. Note what this
 does and does not invalidate: it invalidates the *measurement condition*, not
 the calibration figures recorded above.
 
-If the wiring is opened to swap the module anyway, this is the moment to take
-the clean fix the YAML already documents: **move TRIG from D4/GPIO2 to
-D0/GPIO16.** The strapping hazard was an accepted design compromise, and it has
-now bitten.
+Whenever the wiring is next opened, the YAML already documents a clean
+improvement worth taking: **move TRIG from D4/GPIO2 to D0/GPIO16**, so serial
+flashing stops requiring the sensor to be unplugged. The strapping hazard is an
+accepted design compromise. It is *not* the thing that caused this outage, and
+this entry is careful not to imply the fault proved it necessary.
 
 
 This device is not "done." What's genuinely settled and what isn't:

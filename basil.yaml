@@ -897,6 +897,17 @@ display:
       // attention cue is a 2px outer frame plus one inverted badge rather
       // than inverting the whole panel every frame.
       auto pct = [](float v) { return v < 0 ? 0 : (v > 100 ? 100 : v); };
+      // has_state() means "has published", NOT "published a number". A
+      // sensor that fails publishes NaN, which is a perfectly valid state,
+      // so every guard below asks for a real value instead. Found
+      // 2026-09-20: with the HC-SR04 dead the tank read NaN, sailed through
+      // has_state(), sailed through the sensor's own clamp filter (every
+      // comparison against NaN is false, so neither min nor max bites) and
+      // printed as "-nan%" - which on this font reads like a plausible
+      // number. A dead sensor must look dead.
+      auto ok = [](esphome::sensor::Sensor *s) {
+        return s->has_state() && !std::isnan(s->state);
+      };
 
       // ---- DARK PERIOD: follow the grow light --------------------------
       // Nobody is looking at the box while the lamps are off, and an OLED
@@ -943,13 +954,13 @@ display:
         it.line(4, 52, 60, 52);
 
         it.print(32, 56, id(f_s), TextAlign::TOP_CENTER, "SOIL");
-        if (id(soil_pct).has_state())
+        if (ok(id(soil_pct)))
           it.printf(32, 68, id(f_m), TextAlign::TOP_CENTER, "%.0f%%",
                     id(soil_pct).state);
         else
           it.print(32, 68, id(f_m), TextAlign::TOP_CENTER, "--");
 
-        if (id(tank_pct).has_state()) {
+        if (ok(id(tank_pct))) {
           it.printf(32, 90, id(f_s), TextAlign::TOP_CENTER, "TANK %.0f%%",
                     id(tank_pct).state);
           it.rectangle(6, 106, 52, 9);
@@ -967,14 +978,14 @@ display:
       it.line(0, 14, 64, 14);
 
       it.print(32, 17, id(f_s), TextAlign::TOP_CENTER, "SOIL");
-      if (id(soil_pct).has_state())
+      if (ok(id(soil_pct)))
         it.printf(32, 28, id(f_l), TextAlign::TOP_CENTER, "%.0f%%",
                   id(soil_pct).state);
       else
         it.print(32, 28, id(f_l), TextAlign::TOP_CENTER, "--");
       it.line(0, 58, 64, 58);
 
-      if (id(tank_pct).has_state()) {
+      if (ok(id(tank_pct))) {
         // Stacked like the SOIL block above, and for the same reason.
         // Label-left + value-right does not fit: "TANK" in the 12px font
         // runs to x=32, while the value in the 18px font right-aligned at
@@ -988,12 +999,16 @@ display:
         it.rectangle(6, 88, 52, 8);
         int w = (int) (pct(id(tank_pct).state) * 48.0f / 100.0f);
         if (w > 0) it.filled_rectangle(8, 90, w, 4);
+      } else {
+        it.print(32, 59, id(f_s), TextAlign::TOP_CENTER, "TANK");
+        it.print(32, 70, id(f_m), TextAlign::TOP_CENTER, "--");
+        it.rectangle(6, 88, 52, 8);
       }
       it.line(0, 96, 64, 96);
 
-      if (id(box_temp).has_state())
+      if (ok(id(box_temp)))
         it.printf(32, 100, id(f_s), TextAlign::TOP_CENTER, "%.1f C",
                   id(box_temp).state);
-      if (id(box_rh).has_state())
+      if (ok(id(box_rh)))
         it.printf(32, 113, id(f_s), TextAlign::TOP_CENTER, "%.0f%% RH",
                   id(box_rh).state);
