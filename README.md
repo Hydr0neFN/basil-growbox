@@ -392,20 +392,21 @@ A planned bulk-capacitor mod (470µF + 0.1µF across 3V3) was designed and then
 **stood down** once these measurements came in — its whole premise was a
 voltage problem the data didn't support.
 
-**Heap was suspected first, and the evidence turned out to say the opposite.**
-The cleanest form of the argument needs only two numbers: over 27 minutes of
-routine sampling the device sat at **4.0-4.7 kB free** with no downward
-trend, and then it crashed with *more* headroom than that entire stretch —
-**6.8 kB free**. If exhaustion were the mechanism, the crash belonged in the
-low stretch, not above it.
+**Heap: what the evidence does and does not say.** An earlier version of this
+section said heap was excluded as the mechanism. That went beyond the evidence
+and is retracted here, because the retraction is more instructive than the
+claim was.
 
-The same point lands from the other side once the `captive_portal` fix below
-is in view: with that cut in place the device settled at **6.2-6.9 kB free**
-and ran **12.8 hours straight** there. The 6816 B crash sits inside that band
-— it happened at a heap level the device had already held for half a day.
+What holds: **total free heap at the crash was not anomalous.** The fresh
+reading at 00:16:20 was **6816 B**, squarely inside the **6.2-6.9 kB** band
+the device went on to run **12.8 hours straight** in without incident. And
+before the `captive_portal` cut, 27 minutes of routine sampling sat at
+**4.0-4.7 kB free** with no downward trend, so there is no leak. Total free
+heap does not by itself explain the fault.
 
-The recorder line quoted in the original notes deserves a caveat, because it
-is a good lesson in its own right:
+What does **not** hold is the sentence this section used to carry — "it
+crashed with 11.6 kB contiguous, so it is not an allocation failure." That
+rested on reading one logged line as a simultaneous snapshot. It is not one:
 
 ```
 00:14:11  free=12000  block= 2992  frag=43%   just booted
@@ -424,15 +425,24 @@ choice is visible here: `block=11600 / frag=4%` was measured just after boot,
 when free really was around 12 kB, and only propagated once `free` had already
 fallen to 6.8 kB as Home Assistant re-attached.
 
-So the true reading is *more* favourable to the conclusion, not less - at the
-moment the block was measured the heap was almost entirely contiguous. But any
-single line of that log pairs values captured at different instants, and should
-not be quoted as one instantaneous state.
+The consequence is uncomfortable and worth stating: **`max_block` at the moment
+of the crash is unknown.** By the boot pattern it would have been back near the
+subscribed ~3176 B, not 11.6 kB. A Noise handshake needs a multi-kB *contiguous*
+buffer, and ~3 kB is exactly the regime where that allocation starts to fail.
+So an allocation failure is **not excluded**. Nor does `reset_reason` separate
+the two: an allocation failure that returns null and gets dereferenced lands as
+an `Exception` just as a logic bug does.
 
-**Actual cause, confirmed by direct causal evidence:** a *second* API client
+**So the trigger is established and the mechanism is open.** A code fault in
+the handshake path and an allocation failure are both still live. Separating
+them needs `max_block` sampled at the fault itself, which this watcher cannot
+do — it would need per-field timestamps, or to emit only when all three fields
+share a tick.
+
+**The trigger, which is solid and mechanism-independent:** a *second* API client
 attempting a Noise handshake while one was already attached crashes the
-device outright. `reset_reason` reads `Exception` — an ESP8266 firmware
-fault, not a watchdog bite and not a brownout. The clearest data point: 23
+device. `reset_reason` reads `Exception` — an ESP8266 firmware fault, not a
+watchdog bite and not a brownout. The clearest data point: 23
 hours and 878 log lines with zero exception resets, then a second client was
 deliberately connected — 3 exception resets followed in 3 minutes, each one
 20–60 seconds after a failed handshake attempt. Stopping the second client
@@ -559,9 +569,17 @@ now bitten.
 
 This device is not "done." What's genuinely settled and what isn't:
 
-- **Settled:** the root cause of the reset bursts (a second API client
-  crashing the ESP8266's Noise handshake), and the operational + code
-  mitigations above.
+- **Settled — the trigger:** a second API client attempting a Noise handshake
+  while one is attached crashes the device. Zero Exception resets in 23 hours,
+  three in three minutes the moment a second client was armed, and none after
+  it stopped. That is empirical and holds whatever the mechanism turns out to
+  be. The operational and code mitigations above follow from it.
+- **Open — the mechanism.** A code fault in the handshake path and an
+  allocation failure are both still live, because `max_block` at the moment of
+  the fault is unknown (see the stability section for why the logged value
+  cannot be trusted as a snapshot). Separating them needs `max_block` sampled
+  at the fault, which the current watcher cannot do without per-field
+  timestamps.
 - **Open:** *why* ESPHome 2025.7.5's API component on ESP8266 faults on a
   second handshake attempt instead of just refusing it. Worth checking
   against a newer ESPHome release before assuming it's unfixable in this
