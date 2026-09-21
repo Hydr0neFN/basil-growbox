@@ -222,6 +222,18 @@ it on this specific pot rather than the theory alone.
   before the foil went on, evaporation is adequate and nothing needs
   changing. If it plateaus around 30% and stops moving, the perforation is
   too sparse — the fix is more holes, not removing the foil.
+
+  **First reading, 2026-09-21:** after the 09-20 00:00 flood the soil voltage
+  rose steadily from 0.3018 V to 0.3213 V by 09-21 10:00 — about +0.0006 V/h,
+  reaching the 0.322 V "settled after a flood" anchor after ~34 h. It is
+  drying, not plateaued, but neither outcome above has been reached yet; at
+  this rate `Water below` (≈0.412 V) is roughly 6–7 days out. *Why* it dries
+  this slowly is not established — there is no no-foil rate from this pot to
+  compare against — so it is deliberately not attributed to the foil. One
+  side effect to expect: the OLED shows `SOIL 100%` for a long time after
+  watering, because soil % clamps at 100 for anything wetter than 0.322 V.
+  That is not a stuck sensor; movement in that range only shows in
+  `soil_voltage`.
 - **A real hazard worth stating plainly:** foil is electrically conductive,
   and the relay board and 12V rail sit right next to the pot. It's secured
   for that reason — a loose piece landing on a terminal is a genuine failure
