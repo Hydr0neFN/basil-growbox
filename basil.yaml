@@ -185,6 +185,9 @@ substitutions:
   # wicks upward slowly and the probe sits near the surface, so reading it
   # immediately after a flood reports the transient, not the new moisture.
   soak_hold: "10min"
+  # Soil voltage above this is treated as "probe not in the soil", not as
+  # dry soil. The dry anchor is 0.437; the probe reads 0.767 in air.
+  soil_probe_max: "0.46"
 
 esphome:
   name: ${name}
@@ -462,6 +465,19 @@ sensor:
       #   0.437  a pot the user judged dried out and in trouble  -> 0%
       #   0.322  the same pot settled after a flood              -> 100%
       # Deliberately NOT air (0.767) - see above.
+      #
+      # Plausibility ceiling, added 2026-09-22. Anything drier than the dry
+      # anchor by a clear margin is not soil drying out - soil moves ~0.001
+      # V/h here - it is the probe losing contact. That night a scouring pad
+      # was laid on the surface, the probe ended up partly in the pad's air
+      # instead of the soil, and the reading stepped 0.358 -> 0.474 in ten
+      # minutes. Clamped to 0%, that was "bone dry": it opened a watering
+      # run on a pot at 68%, and because a probe out of the soil never
+      # reaches Stop at, the run would have used all its cycles and come
+      # back after every lockout. NaN makes every watering gate fail closed
+      # (all of them are comparisons) and shows as unknown in HA and "--"
+      # on the OLED, which is the honest answer.
+      - lambda: 'return x > ${soil_probe_max} ? NAN : x;'
       - calibrate_linear:
           - 0.437 -> 0.0
           - 0.322 -> 100.0
@@ -559,7 +575,11 @@ sensor:
 binary_sensor:
   - platform: template
     name: "Needs water"
-    device_class: moisture
+    # NOT device_class moisture: HA renders that class as ON = "Wet",
+    # OFF = "Dry", which is the opposite of what ON means here (the soil
+    # is below the threshold). problem reads ON = "Problem", OFF = "OK".
+    device_class: problem
+    icon: mdi:water-alert
     lambda: |-
       if (!id(soil_pct).has_state()) return false;
       return id(soil_pct).state < id(moist_threshold).state;
@@ -648,6 +668,12 @@ script:
           id(dry_abort)  = false;
           id(soak_done)  = false;
           id(cycles_done) = 0;
+          // Arm the lockout now as well as at the end. Set only at the end,
+          // a reset mid-run (power, OTA, a crash) left no lockout behind and
+          // the next interval tick started a fresh run from cycle 1.
+          if (id(sntp_time).now().is_valid())
+            id(lockout_until) = id(sntp_time).now().timestamp +
+                                (int)(id(lockout_h).state * 3600);
 
       - repeat:
           count: !lambda 'return (uint32_t) id(max_cycles).state;'
@@ -748,7 +774,15 @@ script:
                   - component.update: soil_raw
                   - delay: 2s
                   - lambda: |-
-                      if (id(soil_pct).has_state() &&
+                      // NaN compares false against Stop at, which on its own
+                      // reads as "still dry, go again" - the one gate that
+                      // fails OPEN. A probe that is not in the soil will
+                      // never report the flood, so stop instead.
+                      if (std::isnan(id(soil_pct).state)) {
+                        id(soak_done) = true;
+                        ESP_LOGE("cycle", "soil reading implausible - "
+                                 "probe out of the soil? stopping");
+                      } else if (id(soil_pct).has_state() &&
                           id(soil_pct).state >= id(moist_target).state) {
                         id(soak_done) = true;
                         ESP_LOGI("cycle", "soil %.0f%% >= target, stopping",
@@ -782,7 +816,7 @@ script:
 
 interval:
   # NO light schedule here on purpose. Home Assistant owns the
-  # photoperiod (18h: on 06:00, off 00:00) so that a manual toggle at
+  # photoperiod (17h: on 07:30, off 00:30) so that a manual toggle at
   # bedtime sticks instead of being undone within the minute. The device
   # used to enforce it every 60s; that was correct for autonomy and wrong
   # for control, and control won because the user is in the room.
