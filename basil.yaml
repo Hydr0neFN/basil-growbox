@@ -197,6 +197,17 @@ esp8266:
   board: nodemcuv2
   restore_from_flash: true
 
+# Safety state (drain_fault, lockout_until) must reach flash before the
+# next reset, and the default 60s left a window where a fault latched and
+# a brownout seconds later brought the box back up un-faulted and willing
+# to water into a blocked drain. global_preferences->sync() in the same
+# lambda is no help: a global is only staged for saving in its own loop(),
+# so a sync right after the assignment finds nothing to write. Writes
+# happen only for values that changed, so a short interval costs no wear
+# in steady state.
+preferences:
+  flash_write_interval: 5s
+
 # Explicitly DEBUG. Every logger.log action below defaults to DEBUG level,
 # so raising this to INFO would silently delete the whole event trail -
 # which is exactly what happened on the bench firmware on 2026-09-18 and
@@ -283,7 +294,11 @@ number:
     # 2026-09-18 was gone by the next flash. Change both when retuning.
     initial_value: 1.8
     min_value: 0.5
-    max_value: 5.0
+    # Capped by the tray, not the tank: 1.8 lands ~2.0cm / ~260ml in the
+    # 500ml tray (~144ml per cm), so 3.0 plus the ~0.2cm overshoot is
+    # ~460ml. The tray-to-tank overflow port is not built yet, so nothing
+    # else stops a large Dose from spilling.
+    max_value: 3.0
     step: 0.1
 
   # Ebb & flow: each drain pulls fresh air down into the medium, so the
@@ -366,7 +381,7 @@ globals:
   - id: cal_start
     type: float
     restore_value: false
-    initial_value: '0'
+    initial_value: 'NAN'
   - id: pulse_start
     type: float
     restore_value: false
@@ -404,6 +419,12 @@ globals:
   # cycle instead of just saying FILLING for 20 of the 800 seconds it runs.
   - id: phase
     type: int
+    restore_value: false
+    initial_value: '0'
+  # How far the tank dropped during the current pulse. Lets the early
+  # defuse below tell a real flood from a pulse that moved no water.
+  - id: flooded_cm
+    type: float
     restore_value: false
     initial_value: '0'
 
@@ -695,6 +716,7 @@ script:
                       id(pulse_start) = id(tank_cm).state;
                       id(elapsed) = 0;
                       id(prime_tries) = 0;
+                      id(flooded_cm) = 0;
                       id(cycles_done)++;
                   - lambda: 'id(phase) = 1;'
                   - switch.turn_on: pump_fill
@@ -755,6 +777,7 @@ script:
                                     - switch.turn_off: pump_fill
                   - switch.turn_off: pump_fill
                   - lambda: |-
+                      id(flooded_cm) = id(pulse_start) - id(tank_cm).state;
                       ESP_LOGI("cycle", "cycle %d: flooded %.1f cm in %d s",
                                id(cycles_done),
                                id(pulse_start) - id(tank_cm).state,
@@ -767,6 +790,35 @@ script:
                   # - switch.turn_off: pump_drain
                   - lambda: 'id(phase) = 2;'
                   - delay: ${drain_wait}
+
+                  # ---- EARLY DEFUSE. A latched drain fault is cleared as
+                  # soon as a real flood comes back, instead of only at the
+                  # end of the run. Water now runs even while faulted, so
+                  # "fix the pipe, press Water now, watch it drain" is the
+                  # way to prove the fix - and that proof used to wait for
+                  # the end of a run that can take 15+ min, and was lost if
+                  # the run was cut short. This check lands ~4-5 min in
+                  # (flood + drain_wait); a reset before that still needs the
+                  # Clear drain fault button.
+                  # Only a near-full flood counts, and the tolerance is 40%
+                  # of what was actually flooded, not of the dose: a pinched
+                  # pipe slows the fill until the 120s timeout, and a fixed
+                  # 0.4*dose bar against a short flood is inside the
+                  # ultrasonic's jitter. Fails closed on NaN. Reaches flash
+                  # within flash_write_interval (5s), see preferences:.
+                  - component.update: dist_raw
+                  - delay: 1s
+                  - lambda: |-
+                      if (id(drain_fault) &&
+                          id(flooded_cm) >= id(dose_cm).state * 0.9f) {
+                        float missing = id(level_at_start) - id(tank_cm).state;
+                        if (missing <= id(flooded_cm) * 0.4f) {
+                          id(drain_fault) = false;
+                          ESP_LOGW("cycle", "%.1f cm flooded came back "
+                                   "(%.1f cm short) - drain fault cleared",
+                                   id(flooded_cm), missing);
+                        }
+                      }
 
                   # ---- let it wick upward before believing the probe
                   - lambda: 'id(phase) = 3;'
@@ -803,6 +855,12 @@ script:
             ESP_LOGE("cycle", "aborted: pump would not prime");
           } else if (id(cycles_done) == 0) {
             ESP_LOGW("cycle", "no cycles run - not enough water above pump");
+          } else if (std::isnan(missing)) {
+            // No trustworthy level at one end of the run. Leave the latch
+            // as it is: "missing > x" is false on NaN, and falling through
+            // to the else below used to CLEAR a latched fault on no
+            // evidence at all.
+            ESP_LOGE("cycle", "tank level unreadable - drain not checked");
           } else if (missing > id(dose_cm).state * 0.4f) {
             id(drain_fault) = true;
             ESP_LOGE("cycle", "%.1f cm never returned - DRAIN FAULT", missing);
@@ -811,8 +869,13 @@ script:
             ESP_LOGI("cycle", "done after %d cycles, %.1f cm short",
                      id(cycles_done), missing);
           }
-          id(lockout_until) = id(sntp_time).now().timestamp +
-                              (int)(id(lockout_h).state * 3600);
+          // Same guard as the start of the run: before SNTP syncs,
+          // timestamp is seconds since boot, and writing that would
+          // replace the lockout restored from flash with one already
+          // expired by the time the clock is valid.
+          if (id(sntp_time).now().is_valid())
+            id(lockout_until) = id(sntp_time).now().timestamp +
+                                (int)(id(lockout_h).state * 3600);
 
 interval:
   # NO light schedule here on purpose. Home Assistant owns the
@@ -837,6 +900,8 @@ interval:
           condition:
             and:
               - lambda: 'return !id(drain_fault);'
+              # Pump already on = a calibration fill owns it.
+              - switch.is_off: pump_fill
               - lambda: |-
                   return id(sntp_time).now().is_valid() &&
                          id(sntp_time).now().timestamp > id(lockout_until);
@@ -855,7 +920,18 @@ button:
     name: "Water now"
     icon: mdi:watering-can
     on_press:
-      - script.execute: water_cycle
+      # Refused while a calibration fill has the pump: the cycle would
+      # take the mid-fill level as its start and stop the pump after one
+      # dose, and "save" would then fold that dose into Dose.
+      - if:
+          condition:
+            switch.is_off: pump_fill
+          then:
+            - script.execute: water_cycle
+          else:
+            - logger.log:
+                level: WARN
+                format: "Water now refused - pump busy (calibration?)"
 
   # --- manual dose calibration -------------------------------------------
   # Press "start", watch the tray, press "save" the moment the water reaches
@@ -868,9 +944,43 @@ button:
     on_press:
       - component.update: dist_raw
       - delay: 1s
-      - lambda: 'id(cal_start) = id(tank_cm).state;'
-      - logger.log: "Calibrating - press 'save dose' when the tray is flooded"
-      - switch.turn_on: pump_fill
+      # Same protections as a flood: never start blind or near the inlet,
+      # never while water_cycle is mid-run, and poll the level every 2s
+      # so the floor stops the pump - the 130s watchdog alone is ~8.8cm
+      # of tank, more than the whole margin above pump_min_cm.
+      - if:
+          condition:
+            and:
+              - not:
+                  script.is_running: water_cycle
+              - switch.is_off: pump_fill
+              - lambda: |-
+                  return !std::isnan(id(tank_cm).state) &&
+                         id(tank_cm).state > ${pump_min_cm} + 1.0f;
+          then:
+            - lambda: 'id(cal_start) = id(tank_cm).state;'
+            - logger.log: "Calibrating - press 'save dose' when the tray is flooded"
+            - switch.turn_on: pump_fill
+            - while:
+                condition:
+                  switch.is_on: pump_fill
+                then:
+                  - delay: 2s
+                  - component.update: dist_raw
+                  - if:
+                      condition:
+                        lambda: |-
+                          return std::isnan(id(tank_cm).state) ||
+                                 id(tank_cm).state <= ${pump_min_cm};
+                      then:
+                        - switch.turn_off: pump_fill
+                        - logger.log:
+                            level: WARN
+                            format: "Calibration stopped at the tank floor"
+          else:
+            - logger.log:
+                level: WARN
+                format: "Calibration refused - cycle running, pump busy or tank too low"
 
   - platform: template
     name: "Calibrate: save dose"
@@ -882,10 +992,15 @@ button:
       - delay: 1s
       - lambda: |-
           float drop = id(cal_start) - id(tank_cm).state;
-          if (drop < 0.2f) {
-            ESP_LOGW("cal", "only %.2f cm moved - not saved", drop);
-          } else if (drop > 10.0f) {
-            ESP_LOGW("cal", "%.2f cm exceeds the Dose maximum", drop);
+          // One start, one save: a second save, or a save used just to
+          // stop the pump, must not reuse an old start level.
+          id(cal_start) = NAN;
+          if (std::isnan(drop)) {
+            ESP_LOGW("cal", "no calibration started, or tank unreadable - not saved");
+          } else if (drop < id(dose_cm).traits.get_min_value()) {
+            ESP_LOGW("cal", "only %.2f cm moved - below the Dose minimum, not saved", drop);
+          } else if (drop > id(dose_cm).traits.get_max_value()) {
+            ESP_LOGW("cal", "%.2f cm exceeds the Dose maximum - not saved", drop);
           } else {
             auto call = id(dose_cm).make_call();
             call.set_value(drop);
@@ -901,16 +1016,23 @@ button:
       - lambda: 'id(drain_fault) = false;'
 
 # -------------------------------------------------------------- display
+# Explicit glyph sets. The default is ~116 glyphs per font, and each set
+# sat in DRAM (~3.2kB apiece, ~9.7kB for the three) on a device with
+# ~4-7kB of free heap. A character missing here simply does not draw, so
+# add it here whenever the display lambda prints something new.
 font:
   - file: "gfonts://Roboto"
     id: f_s
     size: 12
+    glyphs: " %-./0123456789:ACEFHIKLMNOPRSTUY"
   - file: "gfonts://Roboto"
     id: f_m
     size: 18
+    glyphs: " !%-0123456789ADEFIKLMNOPRSTU"
   - file: "gfonts://Roboto"
     id: f_l
     size: 26
+    glyphs: "%-0123456789"
 
 display:
   - platform: ssd1306_i2c
