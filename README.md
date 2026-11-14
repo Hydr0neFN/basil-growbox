@@ -1,134 +1,29 @@
+**English** · [繁體中文](README.zh-TW.md)
+
 # Basil grow-box: closed-loop ebb-and-flow irrigation on an ESP8266
 
-**English** · [繁體中文](README.zh-TW.md)
+Indoor basil, zero natural light, bottom-watered by a pump that reads the soil instead of a timer.
 
 ![The grow-box: a terracotta pot of basil seedlings sitting in the mouth of a translucent plastic bucket reservoir, the pot rim wrapped in perforated aluminium foil as a fungus-gnat barrier, under four ring-light lamps on gooseneck stalks clamped to a shelf edge. To the left, a NodeMCU ESP8266 on perfboard with an SSD1306 OLED and a blue 4-channel relay module. Below the shelf, a black tub holding a second board on its lid. The OLED reads 12:41, SOIL 100%, TANK -0.0%, 28.0 C 65% RH.](docs/img/rig-hero.jpg)
 
-*The rig as built, 2026-09-20. The foil around the pot is a fungus-gnat
-barrier, not a seal — see [why perforation still works](#fungus-gnat-control-part-2-perforated-foil) below.
-Seedlings are visibly leggy — long pale stems, sparse leaves — a symptom the
-[grow-light section](#grow-light-and-why-the-schedule-lives-in-home-assistant-not-firmware)
-below has a measured explanation for. The `TANK -0.0%` reading is not a
-separate mystery and is now solved: the photo was taken at 12:41, after the
-tank sensor's last good reading at 10:46 that morning, and the display was
-actually printing **`-nan%`** — which at 18 px reads convincingly as `-0.0%`.
-See [Known issues](#known-issues--open).*
+*The rig as built, 2026-09-20. The foil around the pot is a fungus-gnat barrier, not a seal —
+see [why perforation still works](docs/watering.md#fungus-gnat-control-part-2-perforated-foil).
+The seedlings are visibly leggy; the grow-light section below has a measured explanation.
+The `TANK -0.0%` reading is solved: the photo was taken at 12:41, the tank sensor's last good
+reading was 10:46 that morning, and the display was printing `-nan%`, which at 18 px reads as
+`-0.0%`. See [Known issues](docs/known-issues.md).*
 
-Indoor basil, zero natural light, bottom-watered by ebb and flow: a pump floods
-the outer tray, the water drains back to the reservoir by gravity, and an
-ESP8266 decides when to run the cycle by reading the soil directly rather than
-on a timer. Grow lights are on a schedule too, but that schedule deliberately
-does **not** live in the firmware — see below for why.
+## At a glance
 
-The interesting engineering here turned out not to be the watering logic. It
-was keeping the device itself alive long enough to run it — see
-[The stability story](#the-stability-story-why-the-device-kept-resetting).
+| | |
+|---|---|
+| Problem | Basil indoors with no natural light. A timer cannot see the soil. The pot is bottom-watered. |
+| What I built | A closed-loop ebb-and-flow rig: one pump floods a tray with a measured dose, gravity drains it back to the tank, a capacitive soil probe decides when to water, an ultrasonic sensor guards the tank, and a NodeMCU v3 reports to Home Assistant. |
+| Result | A 1.8cm setpoint delivers ~1.9cm (~247 ml) in ~34s. The four grow rings draw 6.2W total, ~10% of the 60W nameplate. After removing `captive_portal:` the device ran 12.8 hours continuously with Home Assistant as the only client. |
+| Stack | ESP8266 (NodeMCU v3) with ESPHome, Home Assistant on a Raspberry Pi 4, one 12V supply and three DC-DC converters. |
+| Status | Deployed and not finished — open items below. Last dated measurement in this README: 2026-09-21. |
 
-## What it is
-
-- A pot of basil sits inside a tray; the tray sits above a reservoir tank.
-- A single pump floods the tray with a measured dose of water, then is simply
-  switched off — the tray drains back to the tank by gravity siphon through
-  the same tube it was filled through.
-- A capacitive soil probe decides whether the plant needs water and whether a
-  flood/drain cycle actually worked. An ultrasonic sensor on the tank measures
-  how much water is in the reservoir, which doubles as dose control and a
-  dry-run guard.
-- A NodeMCU v3 (ESP8266) runs the whole loop and reports to Home Assistant
-  over the ESPHome native API. Home Assistant is the only user interface —
-  there is no local web UI on the deployed firmware.
-
-## Hardware
-
-| Part | Model | Notes |
-|---|---|---|
-| MCU | NodeMCU v3 (Lolin), ESP8266EX | Serial flashing over USB (CH340), OTA otherwise |
-| Soil moisture | HW-390 capacitive probe v2.0 | Powered from **3V3**, not 5V — see [Wiring](#wiring--pinout) |
-| Tank level | HC-SR04 ultrasonic | 5V supply, 1k/2k divider on ECHO, blind zone 2cm |
-| Box climate | DHT11 | Ambient box air, not the reservoir headspace |
-| Display | SSD1306 0.96" OLED, I2C 0x3C | Mounted portrait (rotated 90°) |
-| Relays | SRD-05VDC-SL-C, 4-channel (2 used) | JD-VCC jumper cap removed, fed separately |
-| Pump | Submersible, 2.5–6V, ~3W | M7 diode across it for flyback suppression |
-| Converters | 2× LM2596S (adjustable) + RY8326 (fixed 5V/3A) | See [Power](#power) |
-| Reservoir | ON Gold Standard 900g whey tub | Body HDPE #2, lid PP #05, ~130 cm² effective cross-section (measured) |
-| Tray | PP #05 container | ~500 ml, ~200 ml usable with the pot inside |
-
-Full connection-by-connection wiring, including the pre-power-on checklist, is
-in [`docs/WIRING.txt`](docs/WIRING.txt) (bilingual, diagrams in monospace ASCII).
-Note: `docs/WIRING.txt` quotes a geometric cross-section (~143 cm²) computed
-from the tub's rim radius alone; the firmware uses the measured figure
-(~130 cm², i.e. 1cm of level change ≈ 130 ml) instead, since the tub tapers
-toward the base and the measured value is the one that actually matches how
-much the level moves per litre.
-
-## Wiring / pinout
-
-Every GPIO choice here is constrained by the ESP8266's boot-strapping pins —
-several GPIOs carry a required level at reset, and getting one wrong either
-prevents boot or prevents flashing.
-
-```
-  A0  soil (HW-390 AOUT, 3V3 supply)
-  D1  GPIO5   OLED SCL
-  D2  GPIO4   OLED SDA                    (I2C 0x3C)
-  D3  GPIO0   relay IN1 -> grow light     (pulled high at boot: boot-mode select)
-  D4  GPIO2   HC-SR04 TRIG                (strapping pin — must unplug the
-                                            sensor to enter USB flash mode)
-  D5  GPIO14  HC-SR04 ECHO, through 1k/2k divider
-  D6  GPIO12  relay IN2 -> fill pump
-  D7  GPIO13  DHT11 data, 10k pullup to 3V3
-  D0  GPIO16  free (candidate: move TRIG here — not a strapping pin)
-  D8  GPIO15  UNUSED — pulled low at boot; an active-low peripheral would
-              latch the board on
-```
-
-Two wiring facts worth calling out because getting them wrong destroys
-hardware rather than just misbehaving:
-
-- **HC-SR04 ECHO must be divided.** The ESP8266EX's absolute maximum GPIO
-  input is 3.6V; a 5V-powered HC-SR04 puts 5V logic straight onto ECHO without
-  one. This is the only place in the whole build where skipping a part
-  permanently burns something out. Only two ECHO wirings are safe: 5V supply
-  *with* the divider, or 3V3 supply *without* it — and a bare 5V-without-divider
-  wiring will read perfectly fine while slowly damaging the pin, so a working
-  reading is not proof the wiring is correct.
-- **Relay logic VCC must be 3V3, not 5V.** These boards are opto-isolated;
-  with a 3.3V GPIO driving IN, a 5V logic rail still leaves ~0.5 mA flowing
-  through the opto on "high" and the relay never releases. At 3V3 it's 2.1 mA
-  on / 0 mA off — a clean switch.
-- **`JD-VCC` (the coil rail) must come from an always-on supply.** If it were
-  fed from a rail that a relay itself switches, opening that relay would cut
-  its own coil power and it could never re-close.
-
-## Power
-
-Three DC-DC converters run off a single 12V supply, all **permanently
-energized** — the relays switch the converter *outputs*, not the 12V inputs.
-That trades a small idle draw (~0.1–0.3W per converter) for two things: the
-LEDs never see a converter's cold-start voltage overshoot, and each rail can
-be trimmed and verified under its actual working load rather than guessed at.
-
-| Converter | Output | Feeds | Measured |
-|---|---|---|---|
-| LM2596S #1 | 4.45V (set under load) | 4× LED grow rings via relay CH1 | 1.4A / 6.2W total (4 rings), ~10% of the 60W nameplate |
-| LM2596S #2 | 5.00V | Submersible pump via relay CH2 | 0.6A run, ~2A stall pulse (tens of ms) |
-| RY8326 | Fixed 5.0V / 3A | NodeMCU VIN, DHT11, HC-SR04, relay JD-VCC | ~0.5A, runs cool |
-
-A pump motor's back-EMF is real: an M7 diode (1A/1000V) sits across the pump
-leads, band toward +. Because the relay switches the converter *output* here,
-the contact is directly interrupting the motor current — without the diode,
-the flyback pulse arcs across the relay contact and pits it a little on every
-cycle.
-
-## Watering loop
-
-The loop is **closed on soil moisture, not on volume delivered.** A single
-flood only moves the soil probe's reading by about 5% of its range, and the
-ultrasonic sensor's ~0.3cm resolution against a ~1.7–2.0cm dose is roughly 20%
-measurement granularity — metering an exact water volume was never going to be
-precise enough to be the control variable. So instead: flood a fixed dose,
-drain it, wait for it to wick upward, read the probe, and go again if it's
-still dry.
+## How it works
 
 ```
                     every 10 min: soil < "Water below"?
@@ -160,478 +55,128 @@ still dry.
                               `---> loop again
 ```
 
-- **Dose** delivered in practice: a 1.8cm setpoint delivers ~1.9cm (~247 ml)
-  in ~34s — about 6s to clear air from the siphon tube plus ~28s of actual
-  flow. The 2-second poll interval against an ~0.06–0.07 cm/s fill rate means
-  the loop structurally overshoots its own setpoint by ~0.1–0.2cm; setpoint
-  changes smaller than ~0.3cm are inside that noise.
-- **Prime retry.** The siphon empties the delivery tube on every drain, so
-  every flood has to push roughly a 70cm column of air out of the line first.
-  A small centrifugal pump can't self-prime against that reliably. If the tank
-  level hasn't moved in 20 seconds, the pump is cut for 3 seconds — letting
-  water fall back and re-flood the impeller housing — then restarted. Up to
-  three tries before the cycle aborts as a dry run.
-- **Fungus gnat control, part 1: the moisture setpoints.** `Stop at` moved
-  70% → 55% and `Water below` moved 30% → 22% (2026-09-20): the soil probe
-  sits near the surface, so these numbers are effectively an instruction for
-  how wet to keep the top few centimetres — which is the entire habitat of
-  *Sciaridae* larvae. The root zone stays saturated from bottom watering
-  either way; only the surface is deliberately kept drier, and a dry spell of
-  4–5 days breaks a 3–4 day gnat generation cycle instead of just slowing it
-  down. The tradeoff is stated plainly right in the firmware comment: raise
-  the threshold back if the plant itself starts to wilt — the basil is the
-  point, the gnats are a nuisance.
+- A pot of basil sits inside a tray; the tray sits above a reservoir tank.
+- A single pump floods the tray with a measured dose, then is simply switched off — the tray
+  drains back through the same tube by gravity siphon.
+- The soil probe decides whether the plant needs water and whether a cycle actually worked.
+  The ultrasonic sensor measures the reservoir, which doubles as dose control and a dry-run
+  guard.
+- Home Assistant is the only user interface; the deployed firmware has no local web UI.
 
-### Fungus gnat control, part 2: perforated foil
+## Hardware
 
-| Before | After |
-|---|---|
-| ![Earlier state of the pot, no foil: bushy young basil seedlings growing directly out of visible dark potting soil, a small white sensor connector clipped to the pot rim, in a bucket reservoir with no cover on the soil.](docs/img/rig-earlier.jpg) | ![The pot rim wrapped in perforated aluminium foil, sealed tight around each stem, from the hero photo above.](docs/img/rig-hero.jpg) |
-| Bare soil surface | Foil barrier, fitted 2026-09-20 |
+| Part | Model | Notes |
+|---|---|---|
+| MCU | NodeMCU v3 (Lolin), ESP8266EX | Serial flashing over USB (CH340), OTA otherwise |
+| Soil moisture | HW-390 capacitive probe v2.0 | Powered from **3V3**, not 5V — see [Wiring](docs/hardware.md#pinout) |
+| Tank level | HC-SR04 ultrasonic | 5V supply, 1k/2k divider on ECHO, blind zone 2cm |
+| Box climate | DHT11 | Ambient box air, not the reservoir headspace |
+| Display | SSD1306 0.96" OLED, I2C 0x3C | Mounted portrait (rotated 90°) |
+| Relays | SRD-05VDC-SL-C, 4-channel (2 used) | JD-VCC jumper cap removed, fed separately |
+| Pump | Submersible, 2.5–6V, ~3W | M7 diode across it for flyback suppression |
+| Converters | 2× LM2596S (adjustable) + RY8326 (fixed 5V/3A) | See [Power](docs/hardware.md#power) |
+| Reservoir | ON Gold Standard 900g whey tub | Body HDPE #2, lid PP #05, ~130 cm² effective cross-section (measured) |
+| Tray | PP #05 container | ~500 ml, ~200 ml usable with the pot inside |
 
-Same day as the setpoint change, a second and more direct measure went in:
-the soil surface is now covered in **perforated aluminium foil**, denying
-gnats the moist bare surface they lay eggs into. It replaced an earlier
-bread/potato-slice larval trap.
+Full connection-by-connection wiring, including the pre-power-on checklist, is in
+[`docs/WIRING.txt`](docs/WIRING.txt) (bilingual, diagrams in monospace ASCII). Note:
+`docs/WIRING.txt` quotes a geometric cross-section (~143 cm²) computed from the tub's rim
+radius alone; the firmware uses the measured figure (~130 cm², i.e. 1cm of level change ≈
+130 ml) instead, since the tub tapers toward the base and the measured value is the one that
+actually matches how much the level moves per litre.
 
-The obvious objection is that any cover should stop evaporation, keep the
-surface wet, blind the near-surface probe, and so stop `Water below` from
-ever firing again. **That objection does not survive perforation.** Diffusion
-through a small opening scales with its *radius*, not its area — a standard
-result for diffusion through a small aperture: *N* holes give a flux
-proportional to *N·r*, while the open area is
-only *N·π·r²* — so many fine holes evaporate far better than their tiny
-total area suggests. Leaves do exactly this: stomata are roughly 1% of leaf
-area and pass about 50% of open-water evaporation. This is the reasoning that
-justified trying it, not a guarantee — it's the idealized case of isolated,
-well-spaced apertures, and the verification below is what actually settles
-it on this specific pot rather than the theory alone.
+The pinout, the wiring facts that destroy hardware if you get them wrong, the power
+measurements and the OLED behaviour: [docs/hardware.md](docs/hardware.md).
 
-- **Hole size is the real design constraint, and it's about the insect, not
-  the water:** holes ≤1mm (pin or drawing-pin). At 2mm and up an adult gnat
-  walks straight through and the barrier is decorative. The genuine weak
-  point is the stem openings — those are necessarily large, and a single gap
-  there voids the whole sheet, so each one is folded or taped tight around
-  its stem.
-- **Bonus effects:** the foil reflects light back up into the canopy, and
-  shades the surface enough that algae — gnat food in its own right — can't
-  establish.
-- **Free, falsifiable verification.** `sensor.basil_soil_voltage` / soil % is
-  already logged continuously, so the check costs nothing: watch it over the
-  following days. If it still falls past `Water below` (22%) the way it did
-  before the foil went on, evaporation is adequate and nothing needs
-  changing. If it plateaus around 30% and stops moving, the perforation is
-  too sparse — the fix is more holes, not removing the foil.
+## The engineering story: why the device kept resetting
 
-  **First reading, 2026-09-21:** after the 09-20 00:00 flood the soil voltage
-  rose steadily from 0.3018 V to 0.3213 V by 09-21 10:00 — about +0.0006 V/h,
-  reaching the 0.322 V "settled after a flood" anchor after ~34 h. It is
-  drying, not plateaued, but neither outcome above has been reached yet; at
-  this rate `Water below` (≈0.412 V) is roughly 6–7 days out. *Why* it dries
-  this slowly is not established — there is no no-foil rate from this pot to
-  compare against — so it is deliberately not attributed to the foil. One
-  side effect to expect: the OLED shows `SOIL 100%` for a long time after
-  watering, because soil % clamps at 100 for anything wetter than 0.322 V.
-  That is not a stuck sensor; movement in that range only shows in
-  `soil_voltage`.
-- **A real hazard worth stating plainly:** foil is electrically conductive,
-  and the relay board and 12V rail sit right next to the pot. It's secured
-  for that reason — a loose piece landing on a terminal is a genuine failure
-  mode in this build, not a theoretical one. The same conductivity is also
-  kept clear of the soil probe's own exposed header pins, for the same
-  reason.
+The interesting engineering here turned out not to be the watering logic. It was keeping the
+device itself alive long enough to run it.
 
-## Safety interlocks
+**Symptom.** The ESP8266 reset several times an hour in bursts, with 86–113 minutes of clean
+uptime between bursts. API clients saw `SocketClosedAPIError`, `EncryptionHelloAPIError`,
+`HandshakeAPIError`, `TimeoutAPIError`.
 
-None of these are optional; each one guards a specific failure mode observed
-or reasoned through during the build.
+**Measurement.** Ping kept answering at 1–2 ms the whole time, even while every API handshake
+failed, and the rails measured 5.23V at the 5V input, 3.29V on 3V3 and 4.42V at the LED rings
+under load. A device that answers ping is not proven to be able to serve a connection, and the
+power measurements did not support a brownout (a microsecond transient is not ruled out).
 
-- **Absolute pump floor (`pump_min_cm`, 6cm).** Checked every 2 seconds inside
-  the flood loop regardless of dose progress. A submersible pump is cooled by
-  the water it moves — running dry kills it in seconds, faster than the 20s
-  no-flow detector could catch it. *(This value is still an estimated
-  placeholder — see [Known issues](#known-issues--open).)*
-- **Independent pump watchdog.** A hard 130-second cutoff for the fill pump,
-  built as a cancellable `script` rather than an inline `delay:` — ESPHome
-  can't cancel an inline delay, so an earlier version fired 130s after the
-  *first* pump start regardless of prime retries turning it off and back on
-  in between, which could have cut a legitimately re-primed fill short.
-- **Drain fault latch — and its actual reset behaviour, which is subtler than
-  it first looks.** If more than 40% of a dose's worth of water hasn't
-  returned to the tank by the end of the drain wait, `drain_fault` latches
-  `on` and takes over the OLED. The automatic 10-minute trigger checks the
-  latch and refuses to start a new cycle while it's set — but the manual
-  `button.basil_water_now` ("Water now") does **not** check it, and will run
-  a cycle regardless. That matters because `drain_fault` is recomputed at the
-  end of *every* `water_cycle` run, whichever trigger started it: if that run
-  completes with water actually returning, the flag clears itself; if the run
-  aborts as a dry run (or never had enough water above the floor to attempt a
-  cycle at all), the flag is left exactly as it was. `button.basil_clear_drain_fault`
-  is the only path that clears it without running water at all.
-- **Tank-empty guard.** `tank_cm < pump_min_cm` triggers `binary_sensor.basil_tank_empty`
-  before any cycle is allowed to run; the Home Assistant alert debounces this
-  5 minutes to ride out the ordinary transient dip during an active flood.
-- **Max cycles cap (5).** A capacitive probe with poor soil contact reads
-  falsely dry (a real failure seen during planting: after thinning, an
-  air-gapped probe read 50–51% in saturated soil until the soil was firmed
-  back around it). Without a hard cap, a lying probe would flood the tray
-  indefinitely.
-- **Structural, not software, fail-safe on drainage.** The reservoir sits
-  *below* the tray. Pump off — for any reason, including a power cut — means
-  gravity drains the tray back down on its own; there is no drain pump or
-  H-bridge to fail in the wrong direction. A welded relay contact is the one
-  failure this can't protect against on its own, which is why the tray also
-  has a **mandatory overflow port** back to the tank, sized for the fact that
-  the tank holds roughly ten times what the tray can (~2.3 L tank vs ~200 ml
-  usable tray).
+**Trigger.** A second API client attempting a Noise handshake while one was already attached
+crashes the device. 23 hours and 878 log lines produced zero exception resets; connecting a
+second client produced three `Exception` resets in three minutes.
 
-## Grow light, and why the schedule lives in Home Assistant, not firmware
+**Fix.** Removing `captive_portal:` freed 2008 B of static RAM (48900 → 46892 B) and 40922 B
+of flash. The device then ran 12.8 hours continuously with Home Assistant as the sole client.
 
-The firmware went through three designs before landing here, and each failure
-is informative:
+**What stays open.** The trigger is established; the mechanism is not. A code fault in the
+handshake path and an allocation failure are both still live, because `max_block` at the
+moment of the crash is unknown.
 
-1. **Time-triggered edges in firmware** (on at a fixed hour, off at another),
-   with the relay's restore mode set to `RESTORE_DEFAULT_OFF`. A daytime
-   reboot or OTA restored the relay to *off* and left the plants dark until
-   the next scheduled "on" edge.
-2. **60-second re-assertion loop in firmware.** Fixed the reboot problem by
-   re-applying the scheduled state every minute — which also meant a manual
-   toggle at bedtime got silently undone within 60 seconds. Correct for
-   autonomy, wrong for actually living with the thing.
-3. **Home Assistant owns the schedule.** The firmware carries no light
-   schedule at all now — the relay is just a `switch` entity. Home Assistant's
-   `automation.basil_grow_light_schedule` fires on two time triggers plus a
-   `homeassistant: start` recovery trigger (an earlier "device came back
-   online" trigger was removed — it turned out `esp8266: restore_from_flash:
-   true` already preserves relay state across reboots, so that trigger was
-   firing on ordinary 3-second API blips and issuing unwanted switch
-   commands). A manual override now sticks until the next scheduled boundary,
-   because nothing re-asserts in between.
+The operational rule that follows: exactly one API client, ever — and stopping the other
+client is not enough until the device's own keepalive expires. The hypothesis table, the heap
+evidence and the recorder lesson: [docs/stability.md](docs/stability.md).
 
-Current schedule: **07:30–00:30 light (17h), 00:30–07:30 dark (7h)** —
-shifted from an original 18h design to fit the room it's in. The 18h design
-target is worth keeping for the light-budget math: four rings measured at
-their brightest controller setting (4.45V / 0.35A each = 1.56W/ring, 6.2W
-total — about 10% of the 60W nameplate) work out to roughly 187 µmol/m²/s and
-a Daily Light Integral around 12.1 mol/m²/day at 18h — scaled to the current
-17h schedule, roughly 11.4 mol/m²/day — which sits at or just under the *low*
-edge of basil's usual 12–16 DLI target, and that estimate is optimistic since
-it assumes every photon lands on the pot. **Mounting clearance matters more
-than anything else here**: PPFD falls off as 1/distance², so rings need to sit
-close to the canopy — about 10cm above it — and the photos in this README show
-what happens when that clearance isn't kept: long pale internodes reaching for
-the light instead of compact growth.
+## Watering loop and safety interlocks
+
+The loop is closed on soil moisture, not on volume delivered — a single flood moves the probe
+by only about 5% of its range, and the ultrasonic sensor's ~0.3cm resolution against a
+~1.7–2.0cm dose is roughly 20% measurement granularity. Flood a fixed dose, drain it, wait
+10 minutes for it to wick upward, read the probe, and go again if it is still dry.
+
+Six interlocks guard the pump: an absolute floor of 6cm, a 130-second watchdog, a drain-fault
+latch, a tank-empty guard, a 5-cycle cap, and a structural fail-safe (reservoir below tray,
+gravity drain, mandatory overflow port).
+
+Dose figures, prime retry, the fungus-gnat setpoints and the perforated-foil barrier:
+[docs/watering.md](docs/watering.md).
+
+## Grow light
+
+Current schedule: **07:30–00:30 light (17h), 00:30–07:30 dark (7h)**. The firmware carries no
+light schedule; `automation.basil_grow_light_schedule` in Home Assistant owns it, after three
+firmware designs each failed in a specific way.
+
+Four rings measured 6.2W total (4.45V / 0.35A each) work out to roughly 187 µmol/m²/s — about
+11.4 mol/m²/day at 17h, at or just under the low edge of basil's 12–16 DLI target, and that estimate is optimistic. Mounting
+clearance matters more than anything else: rings need to sit about 10cm above the canopy, and
+the leggy seedlings in the photo are what happens when that clearance is not kept.
+
+The three designs and the light-budget math: [docs/grow-light.md](docs/grow-light.md).
 
 ## Home Assistant integration
 
 The device exposes itself over the ESPHome native API
-(`Noise_NNpsk0_25519_ChaChaPoly_SHA256` encryption, key in `secrets.yaml`) to
-a Raspberry Pi 4 running Home Assistant. It does not run a local web UI or
-MQTT — HA is the only interface by design (see the note in `basil.yaml` on why
-`web_server:` was removed: an ESP8266 serves very few simultaneous
-connections, and a browser holding a web UI's SSE stream competes directly
-with HA's API session for the same limited slot).
+(`Noise_NNpsk0_25519_ChaChaPoly_SHA256` encryption, key in `secrets.yaml`) to a Raspberry Pi 4
+running Home Assistant. No local web UI and no MQTT — HA is the only interface by design.
 
-| Domain | Purpose |
-|---|---|
-| `sensor` | Soil moisture %, soil voltage (diagnostic), tank %, tank depth, tank distance (diagnostic), box temperature, box humidity, WiFi signal, uptime |
-| `binary_sensor` | Needs water, tank empty, drain fault |
-| `switch` | Grow light (the fill pump is intentionally **not** exposed — an untimed pump switch in someone else's automation is a hazard) |
-| `number` | Dose (cm), Max cycles, Stop at (%), Water below (%), Lockout (h) |
-| `button` | Water now, Calibrate: start fill, Calibrate: save dose, Clear drain fault |
+Nine `sensor` entities (soil moisture %, soil voltage, tank %, tank depth, tank distance, box
+temperature, humidity, WiFi signal, uptime), three `binary_sensor` entities (needs water, tank
+empty, drain fault), one `switch` (grow light; the fill pump is deliberately not exposed),
+five `number` entities (dose, max cycles, stop at, water below, lockout) and four `button`
+entities (water now, calibrate: start fill, calibrate: save dose, clear drain fault). Three
+alert automations notify on state change: drain fault, tank empty with a 5-minute debounce,
+and device offline after 30 minutes.
 
-Three alert automations notify on state change:
+Entity table and alert detail: [docs/home-assistant.md](docs/home-assistant.md). The 128×64
+OLED, its three screens and the refresh-rate change: [docs/hardware.md](docs/hardware.md#oled).
 
-- **Drain fault** — fires immediately on latch, links to the clear-fault button.
-- **Tank empty** — 5-minute debounce to ride out the transient dip during an
-  active flood.
-- **Device offline** — `sensor.basil_uptime` going `unavailable` for 30
-  minutes, long enough to ride out an HA restart or a normal Wi-Fi blip
-  without paging anyone for nothing.
+## Limits and open items
 
-## OLED
+Settled: the trigger for the resets. Open:
 
-128×64 SSD1306, physically mounted on its side and driven as a 64-wide,
-128-tall portrait canvas. Three screens: idle, running (shows phase — `FILL`,
-`DRAIN`, `SOAK`, `PRIME` — and cycle count), and drain fault (full-screen,
-takes over regardless of light state). The display goes dark whenever the
-grow light is off, with two deliberate exceptions: a latched fault or an
-in-progress cycle always stay lit, because a blank screen must never hide
-something that needs a human.
+- The mechanism behind the reset — code fault or allocation failure — because `max_block` at
+  the fault is unknown.
+- `pump_min_cm` (currently 6, a guess) is not yet measured.
+- The overflow port from tray to tank is not yet built.
+- Whether the gnat-control dry-down changes the next cycle is not measured.
+- The dawn half-cycle of the current light schedule has not been observed in production.
+- The NaN display guards are in the config and validate, but are not yet flashed.
 
-The refresh rate is 500ms, and it used to be 250ms driving a full-screen
-inversion twice a second as an "attention" cue. That inversion was removed:
-an all-pixels-lit SSD1306 draws 25–30 mA against ~6 mA for ordinary text, and
-toggling that load at 2 Hz tugged the 3.3V rail hard enough to show up as ADC
-noise and ultrasonic jitter — a plausible contributor to an API drop observed
-mid-flood. The attention cue is now a static 2px border plus one small
-inverted badge, at a fraction of the current swing.
+Full write-ups, including the three-hour outage that was a loose connector and the `-nan%`
+explanation: [docs/known-issues.md](docs/known-issues.md).
 
-## The stability story: why the device kept resetting
-
-This is the most interesting part of the build, and it's worth being precise
-about what was actually established versus what was ruled out.
-
-**Symptom.** The ESP8266 reset several times an hour in bursts, with 86–113
-minutes of clean uptime between bursts. From an API client the failures
-looked like `SocketClosedAPIError`, `EncryptionHelloAPIError`,
-`HandshakeAPIError`, `TimeoutAPIError`.
-
-**The discriminator that mattered:** ping kept answering at 1–2 ms the entire
-time, even while every API handshake failed. ICMP on this device is served by
-the SDK/lwIP network stack, not by the Arduino main loop — so a device that
-answers ping is not proven to be able to serve a connection at all. That one
-fact is what kept the debugging honest instead of chasing "the device is
-online, so it can't be a firmware fault."
-
-Three plausible causes were raised and killed, each by a specific measurement:
-
-| Hypothesis | Why it looked plausible | What killed it |
-|---|---|---|
-| HA holds the only API slot, and that's inherently unstable | Home Assistant was connected during every failure | Two clean runs, 86.7 min and 112.7 min, with HA connected and **idle** the whole time |
-| Connection churn (reconnects, log streaming) crashes it | Every reset cluster coincided with *someone doing something* | That's confounded, not causal — flashing, watering tests and DEBUG log streaming all happened during the same windows |
-| Power sag under load (pump/LED in-rush) | Textbook brownout shape | Measured 5.23V at the 5V input, **3.29V on 3V3**, 4.42V at the LED rings under load — a chronic droop would read under 3.0V. (A microsecond transient during WiFi TX is *not* ruled out — a multimeter can't see one — but 3.29V standing leaves little room for it to matter.) |
-
-A planned bulk-capacitor mod (470µF + 0.1µF across 3V3) was designed and then
-**stood down** once these measurements came in — its whole premise was a
-voltage problem the data didn't support.
-
-**Heap: what the evidence does and does not say.** An earlier version of this
-section said heap was excluded as the mechanism. That went beyond the evidence
-and is retracted here, because the retraction is more instructive than the
-claim was.
-
-What holds: **total free heap at the crash was not anomalous.** The fresh
-reading at 00:16:20 was **6816 B**, squarely inside the **6.2-6.9 kB** band
-the device went on to run **12.8 hours straight** in without incident. And
-before the `captive_portal` cut, 27 minutes of routine sampling sat at
-**4.0-4.7 kB free** with no downward trend, so there is no leak. Total free
-heap does not by itself explain the fault.
-
-What does **not** hold is the sentence this section used to carry — "it
-crashed with 11.6 kB contiguous, so it is not an allocation failure." That
-rested on reading one logged line as a simultaneous snapshot. It is not one:
-
-```
-00:14:11  free=12000  block= 2992  frag=43%   just booted
-00:14:30  free= 7152  block=11632  frag= 4%
-00:15:00  free= 6872  block= 3408  frag=44%
-00:16:20  free= 6816  block=11600  frag= 4%   <- the sample that got quoted
-```
-
-`block` is the largest contiguous free block, so it **cannot exceed** `free`.
-Those last two columns do not belong to that `free` reading. The watcher joins
-three independently-updating Home Assistant sensors and seeds each from its
-last known value rather than waiting for a synchronised tick - deliberately,
-because an earlier version silently collected nothing for 45 minutes waiting
-for a sensor that had been byte-identical for over an hour. The cost of that
-choice is visible here: `block=11600 / frag=4%` was measured just after boot,
-when free really was around 12 kB, and only propagated once `free` had already
-fallen to 6.8 kB as Home Assistant re-attached.
-
-The consequence is uncomfortable and worth stating: **`max_block` at the moment
-of the crash is unknown.** By the boot pattern it would have been back near the
-subscribed ~3176 B, not 11.6 kB. A Noise handshake needs a multi-kB *contiguous*
-buffer, and ~3 kB is exactly the regime where that allocation starts to fail.
-So an allocation failure is **not excluded**. Nor does `reset_reason` separate
-the two: an allocation failure that returns null and gets dereferenced lands as
-an `Exception` just as a logic bug does.
-
-**So the trigger is established and the mechanism is open.** A code fault in
-the handshake path and an allocation failure are both still live. Separating
-them needs `max_block` sampled at the fault itself, which this watcher cannot
-do — it would need per-field timestamps, or to emit only when all three fields
-share a tick.
-
-**The trigger, which is solid and mechanism-independent:** a *second* API client
-attempting a Noise handshake while one was already attached crashes the
-device. `reset_reason` reads `Exception` — an ESP8266 firmware fault, not a
-watchdog bite and not a brownout. The clearest data point: 23
-hours and 878 log lines with zero exception resets, then a second client was
-deliberately connected — 3 exception resets followed in 3 minutes, each one
-20–60 seconds after a failed handshake attempt. Stopping the second client
-stopped the resets.
-
-**The operational rule that follows:** exactly one API client, ever. Home
-Assistant holds it. And there's a subtlety that costs real debugging time if
-you miss it — **stopping the other client isn't enough on its own.** The
-device keeps its half of a dropped connection alive until its own keepalive
-expires; connecting inside that window still counts as a second client and
-still crashes it, confirmed by a reset that happened when a script connected
-three minutes after the other side's socket had already closed.
-
-**The fix that shipped:** removing `captive_portal:`, which pulls in a web
-server and DNS server neither used in practice, freed 2008 B of static RAM
-(48900 → 46892 B) and 40922 B of flash. The device then ran **12.8 hours
-continuously** with HA as the sole client — the control run that everything
-else is measured against.
-
-**One number worth carrying forward on its own:** adding the diagnostics that
-found all of this — heap sensors, reset-reason reporting — cost about 655 B,
-roughly 0.8% of total RAM. On a device with 3–4 kB free, that's a fifth of the
-remaining headroom. Measuring the edge moved the edge.
-
-**A second, unrelated lesson came out of the recorder that collected all this
-data, not the device itself.** It originally ran under a service manager's
-"always restart" policy, driven by a script with its own hard end time. Once
-that deadline passed, the script would exit cleanly, the service manager
-would relaunch it, it would see the deadline already behind it, and exit
-again — every few seconds, forever, a restart loop dressed up as a healthy
-service. Fixed by switching to "restart on failure only." The general rule:
-an always-restart policy belongs on something meant to run forever, not on a
-job that has a horizon.
-
-## Known issues / open
-
-### A three-hour outage that was a loose connector — and what it accidentally measured
-
-On 2026-09-20 the HC-SR04 stopped reading and the board would not boot with it
-connected. It was a **loose DuPont connector**, reseated at 13:46, and the
-sensor came back immediately. The write-up survives because two things it
-produced are worth more than the fault was.
-
-**Firmware was excluded by timeline, not by argument.** The first instinct was
-that recent firmware changes had broken it. The build flashed at 00:58 read a
-steady **7.82-7.85 cm continuously until 10:24** — 9.5 hours. It went
-unavailable during a session of physical work, gave one last good reading at
-**10:46:02**, and produced nothing after, while the device itself stayed up.
-Same binary either side of a hardware intervention, so the revisions could not
-be the cause. A recorder on the Pi settled in one query what would otherwise
-have been an afternoon of bisecting firmware.
-
-**The proof it was only ever the connection is unusually clean:**
-
-```
-10:46:02  last good      7.82039976119995 cm   95.1166687011719 %
-13:46:47  after reseat   7.82039976119995 cm   95.1166687011719 %
-```
-
-Bit-for-bit identical, three hours apart. The water level had not moved and the
-sensor had not drifted.
-
-**And that identity measured something that had only been reasoned.** The
-section below argues that with the tank sensor reading NaN, every pump gate
-compares false and no watering can run. That was inference. Three hours of an
-unchanged water level, to the last digit, is evidence: no cycle ran in that
-window. Inference at 13:00, measurement at 13:46.
-
-A working hypothesis was recorded during the outage — that the module had
-failed in a way that loaded TRIG, which would have explained the read failure
-and the boot failure with one fault. **It is retracted.** It was parsimonious
-and wrong; the connector was on the same suspect list and was the cheapest item
-on it. Note what that means for the boot symptom: it is **not** explained by a
-loaded TRIG, and remains the original GPIO2 strapping hazard. A loose connector
-plausibly makes that hazard surface more readily, but that is not established
-and should not be written as though it were.
-
-Two other suspects were ruled out along the way. The ECHO 1k/2k divider is
-**SMD 0805, soldered**, not flying leads, so a pulled divider wire was never in
-play. And the aluminium foil did **not** touch anything near the HC-SR04.
-
-### The display was printing `-nan%`, and three guards let it through
-
-The `TANK -0.0%` on the photo above was never a rendering bug or a stale value.
-`sensor.basil_tank` has been `unknown` since 10:47:20, Home Assistant renders a
-NaN state as `unknown`, and the OLED was printing `-nan%` — which in the 18 px
-font is a convincing `-0.0%`.
-
-NaN walked through three guards in a row, and each one failed for a different
-reason:
-
-| Guard | Why it did not catch NaN |
-|---|---|
-| `has_state()` | A NaN state *is* a published state. Passes. |
-| `clamp {min: 0, max: 100}` | Every comparison against NaN is false, so neither bound bites. Passes. |
-| `printf("%.0f")` | Renders it as `-nan`. |
-
-The clamp genuinely is there and genuinely does nothing. Display guards are now
-`has_state() && !std::isnan(state)`, and the TANK block gained a `--`
-else-branch it never had — previously a dead tank drew nothing at all, which
-reads as a broken screen rather than a broken sensor. Config validates; not yet
-flashed.
-
-### With the tank sensor dead the rig was safe by accident, not by design
-
-Worth stating plainly, because it is exactly the kind of thing a later,
-well-meaning "fix NaN handling" could turn into a fail-open.
-
-Every pump gate is a comparison against `tank_cm` — the pre-cycle check
-(`(tank_cm - dose_cm) > pump_min_cm`) and the in-loop floor (`tank_cm >
-pump_min_cm`). **Every comparison against NaN is false**, so neither gate could
-pass: no cycle could start, and a running one could not continue. With the
-sensor dead the pump simply could not run — and the bit-identical water level
-three hours later confirms none did.
-
-The same semantics silently disable the tank-empty alert, which is the mirror
-image of the same fact: during the outage there was no level protection at all,
-only inaction. Safe, but for a reason nobody designed.
-
-**One more consequence, on a different sensor.** The foil did touch the
-**capacitive soil probe**. That damages nothing, but a conductive sheet against
-a capacitive sensor couples into the sense electrodes and inflates the reading
-toward wet. Any soil percentage taken in that state is unusable. Note what this
-does and does not invalidate: it invalidates the *measurement condition*, not
-the calibration figures recorded above.
-
-Whenever the wiring is next opened, the YAML already documents a clean
-improvement worth taking: **move TRIG from D4/GPIO2 to D0/GPIO16**, so serial
-flashing stops requiring the sensor to be unplugged. The strapping hazard is an
-accepted design compromise. It is *not* the thing that caused this outage, and
-this entry is careful not to imply the fault proved it necessary.
-
-
-This device is not "done." What's genuinely settled and what isn't:
-
-- **Settled — the trigger:** a second API client attempting a Noise handshake
-  while one is attached crashes the device. Zero Exception resets in 23 hours,
-  three in three minutes the moment a second client was armed, and none after
-  it stopped. That is empirical and holds whatever the mechanism turns out to
-  be. The operational and code mitigations above follow from it.
-- **Open — the mechanism.** A code fault in the handshake path and an
-  allocation failure are both still live, because `max_block` at the moment of
-  the fault is unknown (see the stability section for why the logged value
-  cannot be trusted as a snapshot). Separating them needs `max_block` sampled
-  at the fault, which the current watcher cannot do without per-field
-  timestamps.
-- **Open:** *why* ESPHome 2025.7.5's API component on ESP8266 faults on a
-  second handshake attempt instead of just refusing it. Worth checking
-  against a newer ESPHome release before assuming it's unfixable in this
-  version.
-- **Open:** no *spontaneous* `reset_reason` has been captured yet — every
-  reset logged so far followed a flash, an OTA, or a deliberate second
-  client. The next unplanned reset is the evidence that would either confirm
-  the cause is fully closed or reopen it.
-- **Open:** whether the post-fix `max_block` (3176 B) is comfortably above
-  whatever threshold the Noise handshake actually needs, or just happens to
-  be above it. This isn't practically testable without deliberately crashing
-  the device again.
-- **Not yet measured:** `pump_min_cm` (currently 6, a guess) — the intended
-  process is to stand the pump on the tank floor, add water until it primes
-  without gurgling, and set the floor 1cm above that depth.
-- **Not yet built:** the overflow port from tray to tank. Structurally this is
-  the only thing that protects against a welded relay contact, given the tray
-  holds roughly a tenth of what the tank does — and it matters even in normal
-  operation, not just fault cases: the tray's own usable headroom around the
-  pot (~200 ml) is already close to the ~247 ml a normal dose delivers.
-  Until the port exists, the two calibration buttons below are the sharper
-  version of the same risk: they have no dose-based cutoff of their own, only
-  the 130-second pump watchdog, so an unattended calibration run can push
-  close to a litre through the tray.
-- **Unexplained:** the `TANK -0.0%` reading visible on the OLED in the hero
-  photo above. The tank-percentage sensor is clamped to a 0–100 range in the
-  firmware, so a negative display value on real hardware doesn't yet have a
-  traced cause — it's left here rather than guessed at.
-- **Not yet observed in production:** a full "dawn" half-cycle of the current
-  Home Assistant light schedule (dusk was verified; dawn had not fired yet as
-  of the last recorded check).
-- **Not yet checked:** whether the gnat-control dry-down (soil pulled down to
-  22% between waterings) changes how the *following* cycle behaves. A more
-  parched pot plausibly absorbs more water on rewetting than the ~247 ml
-  baseline this document's dose figures are built on, which is exactly the
-  kind of shift that could nudge the drain-fault math. No measurement exists
-  yet either way.
-
-## Build / flash / OTA
+## Build / run
 
 ```sh
 cp secrets.yaml.example secrets.yaml
@@ -645,39 +190,23 @@ esphome run basil.yaml --device COM15      # first flash, over USB
 esphome run basil.yaml --device basil.local  # subsequent updates, over OTA
 ```
 
-Always pass `--device` explicitly — a bare `esphome run` prompts for a host
-interactively and dies on EOF when run non-interactively.
+Always pass `--device` explicitly — a bare `esphome run` prompts for a host interactively and
+dies on EOF when run non-interactively.
 
-There is no OTA password on this device by design: the tradeoff made here is
-that losing access to the source tree (and thus the password) is judged more
-likely than someone else on the LAN pushing firmware. Recovery without a
-password means opening the box and flashing over USB.
+There is no OTA password on this device by design: losing access to the source tree (and thus
+the password) is judged more likely than someone else on the LAN pushing firmware. Recovery
+without a password means opening the box and flashing over USB.
 
-**OTA also has to respect the one-API-client rule above, and the measured
-procedure is worth stating exactly** because getting the timing wrong costs
-an OTA attempt, not just a connection retry: block Home Assistant's
-connection to the device first, wait for its side of the socket to clear
-(~80s), then wait a *further* ~2 minutes for the device's own keepalive on
-that dropped connection to expire before uploading — connecting inside that
-second window still counts as a second client and can reset the device
-mid-upload. Done in that order, a real upload completed in **18.34 seconds,
-clean, first try** — against two failed attempts the night before (61% and
-16% progress) while HA was still attached. Lift whatever block you used
-immediately after, and check the next light-schedule boundary before opening
-that window at all, since Home Assistant loses control of the relay for as
-long as it's blocked.
+OTA also has to respect the one-API-client rule. Block Home Assistant, wait ~80s for its side
+of the socket to clear, then wait a further ~2 minutes for the device's keepalive to expire
+before uploading; done in that order, a real upload completed in **18.34 seconds, clean, first
+try**. Treat 2 minutes as the shortest wait that has worked, not a guaranteed threshold. The
+exact procedure and the two failed attempts: [docs/ota.md](docs/ota.md).
 
-Treat that ~2-minute figure as the shortest wait that has actually worked,
-not a guaranteed threshold: a separate measurement elsewhere in this project
-recorded a reset when a client connected exactly three minutes after the
-other side's socket had cleared. The two data points don't fully agree on
-where the safe line is — when in doubt, wait longer than 2 minutes.
-
-`basil-bench.yaml` is a separate, superseded build kept for reference: sensors
-and a local web UI, no relays, no pump, no WiFi — used to read off calibration
-numbers on the bench before the real rig existed. It's wired differently (see
-the comment block at the top of the file) and should not be flashed onto the
-deployed device.
+`basil-bench.yaml` is a separate, superseded build kept for reference: sensors and a local web
+UI, no relays, no pump, no WiFi — used to read off calibration numbers on the bench before the
+real rig existed. It's wired differently (see the comment block at the top of the file) and
+should not be flashed onto the deployed device.
 
 ## Repo layout
 
@@ -695,11 +224,10 @@ watch-water.py           same, but reconnects through drops - used to
 ```
 
 All three Python scripts open their own API connection to the device. Per
-[the stability story](#the-stability-story-why-the-device-kept-resetting),
-that makes them a second client whenever Home Assistant is already attached
-— which crashes the device, not just the script. Free the slot first (stop
-or block HA's connection) and wait for the device's own keepalive to expire,
-not just for HA's socket to close, before running any of them.
+[the stability story](#the-engineering-story-why-the-device-kept-resetting), that makes them
+a second client whenever Home Assistant is already attached — which crashes the device, not
+just the script. Free the slot first (stop or block HA's connection) and wait for the device's
+own keepalive to expire, not just for HA's socket to close, before running any of them.
 
 ## License
 
