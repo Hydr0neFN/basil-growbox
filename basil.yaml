@@ -258,6 +258,7 @@ time:
   - platform: sntp
     id: sntp_time
     servers: [nl.pool.ntp.org]
+    timezone: Europe/Amsterdam
     # 18h photoperiod, lit 06:00-24:00 and dark 00:00-06:00. Basil
     # tolerates 18h and 6h of dark is enough. The extra 2h over a
     # conventional 16h is compensation, not preference: the rings
@@ -337,7 +338,11 @@ number:
     # how wet to keep the top of the pot - and the top 2-3cm is the entire
     # habitat of the larvae. 70% was comfortable for them. The root zone is
     # still saturated by bottom watering; only the surface is left drier.
-    initial_value: 55
+    # 2026-11-07: 55 -> 45. The surface probe topped out at 46-52% after five
+    # cycles every day, so 55 was never reached and every run used all of
+    # Max cycles. The gnats are gone (stones stay as the barrier), so the
+    # gnat-driven dryness no longer needs to dominate.
+    initial_value: 45
     min_value: 40
     max_value: 95
     step: 5
@@ -355,7 +360,9 @@ number:
     # dry-down that reaches 4-5 days actually breaks the cycle instead of
     # just slowing it. Raise it back if the basil wilts - the plant is the
     # point, the gnats are a nuisance.
-    initial_value: 22
+    # 2026-11-07: 22 -> 30. Gnats confirmed gone; the stone layer stays as
+    # isolation. Back to the plant-first value.
+    initial_value: 30
     min_value: 10
     max_value: 60
     step: 1
@@ -800,7 +807,7 @@ script:
                   # the run was cut short. This check lands ~4-5 min in
                   # (flood + drain_wait); a reset before that still needs the
                   # Clear drain fault button.
-                  # Only a near-full flood counts, and the tolerance is 40%
+                  # Only a near-full flood counts, and the tolerance is 60%
                   # of what was actually flooded, not of the dose: a pinched
                   # pipe slows the fill until the 120s timeout, and a fixed
                   # 0.4*dose bar against a short flood is inside the
@@ -812,7 +819,7 @@ script:
                       if (id(drain_fault) &&
                           id(flooded_cm) >= id(dose_cm).state * 0.9f) {
                         float missing = id(level_at_start) - id(tank_cm).state;
-                        if (missing <= id(flooded_cm) * 0.4f) {
+                        if (missing <= id(flooded_cm) * 0.6f) {
                           id(drain_fault) = false;
                           ESP_LOGW("cycle", "%.1f cm flooded came back "
                                    "(%.1f cm short) - drain fault cleared",
@@ -861,7 +868,12 @@ script:
             // to the else below used to CLEAR a latched fault on no
             // evidence at all.
             ESP_LOGE("cycle", "tank level unreadable - drain not checked");
-          } else if (missing > id(dose_cm).state * 0.4f) {
+          // Tolerance 60% of the dose. A dry pot holds back a real share
+          // of the flood: 2026-11-20 the soil went 30% -> 100%, 2.2 cm
+          // flooded, 0.82 cm stayed in the medium with the tray empty, and
+          // the old 40% bar (0.80 cm) latched a false fault. A blocked
+          // drain keeps the whole flood (~2.2 cm), still far above 1.2.
+          } else if (missing > id(dose_cm).state * 0.6f) {
             id(drain_fault) = true;
             ESP_LOGE("cycle", "%.1f cm never returned - DRAIN FAULT", missing);
           } else {
@@ -905,6 +917,11 @@ interval:
               - lambda: |-
                   return id(sntp_time).now().is_valid() &&
                          id(sntp_time).now().timestamp > id(lockout_until);
+              # Automatic watering only 08:00-24:00 local: no pump noise or
+              # prime retries at night in the bedroom. Water now still works.
+              - lambda: |-
+                  auto t = id(sntp_time).now();
+                  return t.is_valid() && t.hour >= 8;
               - lambda: |-
                   return id(soil_pct).has_state() &&
                          id(soil_pct).state < id(moist_threshold).state;
